@@ -1,9 +1,11 @@
 const bodyParser = require('body-parser')
 const express = require('express')
+const Main = require('./lib/main')
 
 const PORT = process.env.PORT || 3000
 
 const app = express()
+let main = new Main()
 app.use(bodyParser.json())
 
 app.get('/', handleIndex)
@@ -14,39 +16,48 @@ app.post('/end', handleEnd)
 app.listen(PORT, () => console.log(`Battlesnake Server listening at http://127.0.0.1:${PORT}`))
 
 
-function handleIndex(request, response) {
-  var battlesnakeInfo = {
-    apiversion: '1',
-    author: '',
-    color: '#888888',
-    head: 'default',
-    tail: 'default'
+function handleIndex (request, response) {
+  try {
+    var battlesnakeInfo = {
+      apiversion: '1',
+      author: '',
+      color: '#ff69b4',
+      head: 'bendr',
+      tail: 'freckled'
+    }
+    response.status(200).json(battlesnakeInfo)
+  } catch (e) {
+    console.error(e)
   }
-  response.status(200).json(battlesnakeInfo)
 }
 
-function handleStart(request, response) {
-  var gameData = request.body
-
-  console.log('START')
-  response.status(200).send('ok')
+async function handleStart (request, response) {
+  try {
+    console.log('START')
+    main = new Main(request.body)
+    response.status(200).send('ok')
+  } catch (e) {
+    console.error(e)
+  }
 }
 
-function handleMove(request, response) {
-  var gameData = request.body
-
-  var possibleMoves = ['up', 'down', 'left', 'right']
-  var move = possibleMoves[Math.floor(Math.random() * possibleMoves.length)]
-
-  console.log('MOVE: ' + move)
-  response.status(200).send({
-    move: move
-  })
+async function handleMove (request, response) {
+  try {
+    const move = await main.handleMove(request.body)
+    const shout = `I guess I'll go ${move} then.`
+    console.log('MOVE: ' + shout)
+    response.status(200).send({ move, shout })
+  } catch (e) {
+    console.error(e)
+  }
 }
 
-function handleEnd(request, response) {
-  var gameData = request.body
-
-  console.log('END')
-  response.status(200).send('ok')
+async function handleEnd (request, response) {
+  try {
+    console.log('END')
+    await main.handleEnd(request.body)
+    response.status(200).send('ok')
+  } catch (e) {
+    console.error(e)
+  }
 }
