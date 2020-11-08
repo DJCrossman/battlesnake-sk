@@ -1,0 +1,45 @@
+# Do not change version. This is the version of aws buildspec, not the version of your buildspec file.
+version: 0.2
+env:
+  variables:
+    AWS_ENVIRONMENT: "production"
+phases:
+  install:
+    runtime-versions:
+      nodejs: 10
+  pre_build:
+    commands:
+      - echo Installing NPM dependencies...
+      - npm install
+  build:
+    commands:
+      - echo Build started on `date`
+      - npm run build
+      - echo Run tests...
+      - npm run test
+  post_build:
+    commands:
+      - echo Build completed on `date`
+# Include only the files required for your application to run.
+# Do not use recursively include artifacts from node_modules directory as it will include unnecessary packages
+# used only for building and testing.
+# ExpressJS apps will need other artifact directories included (bin/*, public/*, routes/*, views/* etc).
+artifacts:
+  files:
+    - ./.ebextensions/**/*
+    - ./dist/**/*
+    - ./tmp/**/*
+    - ./package.json
+    - ./Procfile
+  secondary-artifacts:
+    ApiArtifact:
+      base-directory: ./
+      files:
+        - ./.ebextensions/*
+        - ./dist/**/*
+        - ./tmp/**/*
+        - ./package.json
+        - ./Procfile
+cache:
+  paths:
+    - ./node_modules/**/*
