@@ -1,12 +1,16 @@
 import { Injectable } from '@nestjs/common';
 import { BoundaryService } from '../boundary/boundary.service';
 import { Direction, DirectionEnum } from '../dtos/direction';
-import { GameState } from '../dtos/game-state';
+import { Coordinate, GameState, Snake } from '../dtos/game-state';
 import { MoveRank } from '../dtos/move-rank';
 
 @Injectable()
 export class MovementService {
   random: boolean = true;
+
+  private foodWeight = 0.6
+  private conflictWeight = 0.4
+  private defaultWeight = 0.5
 
   constructor(private boundaryService: BoundaryService) {}
 
@@ -27,13 +31,31 @@ export class MovementService {
       state.board.food,
       newState.you.head,
     );
-    if (isOnFoodSource) {
+    const hasConflictPotential = (await Promise.all(newState.board.snakes.map((snake: Snake): boolean => {
+      if (snake.id === newState.you.id) return false
+      const snakeMoves: Coordinate[] = options.map((m: Direction) => this.boundaryService.moveAsCoord(m, snake.head))
+      return this.boundaryService.withinSet(
+        snakeMoves,
+        newState.you.head,
+      )
+    }))).some(m => m)
+    if (hasConflictPotential) {
       moves = await Promise.all(
         options.map(m =>
           this.calculateMove(
             newState,
             m,
-            weight / 2,
+            weight * this.conflictWeight,
+          ),
+        ),
+      );
+    } else if (isOnFoodSource) {
+      moves = await Promise.all(
+        options.map(m =>
+          this.calculateMove(
+            newState,
+            m,
+            weight * this.foodWeight,
           ),
         ),
       );
@@ -43,14 +65,14 @@ export class MovementService {
           this.calculateMove(
             newState,
             m,
-            weight / 3,
+            weight * this.defaultWeight,
           ),
         ),
       );
     }
     const projectedWeight =
       moves.reduce((a, b) => a + b.weight, 0) / moves.length;
-    return projectedWeight + weight / 2;
+    return projectedWeight + (weight * this.defaultWeight);
   }
 
   async calculateMove(

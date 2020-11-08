@@ -271,4 +271,161 @@ describe('MovementService', () => {
     expect(weight).toBeGreaterThan(0);
     done();
   });
+
+  it('should avoid conflict', async (done) => {
+    const state: GameState = {
+      game: {
+        id: '64a4df54-6631-46e6-8010-88a65f5c467f',
+        ruleset: {
+          name: 'standard',
+          version: 'v1.0.13',
+        },
+        timeout: 500,
+      },
+      turn: 60,
+      board: {
+        height: 11,
+        width: 11,
+        snakes: [
+          {
+            id: 'gs_3w6HTQYFxv79KwkpFF48K93X',
+            name: 'Wascana Willy',
+            latency: '11',
+            health: 76,
+            body: [
+              {
+                x: 6,
+                y: 8,
+              },
+              {
+                x: 6,
+                y: 7,
+              },
+              {
+                x: 6,
+                y: 6,
+              },
+              {
+                x: 6,
+                y: 5,
+              },
+              {
+                x: 7,
+                y: 5,
+              },
+              {
+                x: 8,
+                y: 5,
+              },
+              {
+                x: 9,
+                y: 5,
+              },
+            ],
+            head: {
+              x: 6,
+              y: 8,
+            },
+            length: 7,
+            shout: '',
+          },
+          {
+            id: 'gs_YtvcJvcJyPR8PTGG3dPgjddW',
+            name: 'Wascana Willy',
+            latency: '7',
+            health: 95,
+            body: [
+              {
+                x: 4,
+                y: 8,
+              },
+              {
+                x: 4,
+                y: 7,
+              },
+              {
+                x: 4,
+                y: 6,
+              },
+              {
+                x: 4,
+                y: 5,
+              },
+              {
+                x: 4,
+                y: 4,
+              },
+            ],
+            head: {
+              x: 4,
+              y: 8,
+            },
+            length: 5,
+            shout: '',
+          },
+        ],
+        food: [
+          {
+            x: 2,
+            y: 0,
+          },
+          {
+            x: 3,
+            y: 0,
+          },
+          {
+            x: 4,
+            y: 10,
+          },
+          {
+            x: 1,
+            y: 0,
+          },
+          {
+            x: 8,
+            y: 2,
+          },
+        ],
+        hazards: [],
+      },
+      you: {
+        id: 'gs_YtvcJvcJyPR8PTGG3dPgjddW',
+        name: 'Wascana Willy',
+        latency: '7',
+        health: 95,
+        body: [
+          {
+            x: 4,
+            y: 8,
+          },
+          {
+            x: 4,
+            y: 7,
+          },
+          {
+            x: 4,
+            y: 6,
+          },
+          {
+            x: 4,
+            y: 5,
+          },
+          {
+            x: 4,
+            y: 4,
+          },
+        ],
+        head: {
+          x: 4,
+          y: 8,
+        },
+        length: 5,
+        shout: '',
+      },
+    };
+    const { move, weight } = await service.findMove(state, 1);
+    expect(move).toBe('left');
+    expect(weight).toBeGreaterThan(0);
+    done();
+  });
 });
