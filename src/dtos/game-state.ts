@@ -19,12 +19,12 @@ export interface Snake {
   id: string;
   name: string;
   health: number;
-  body: Body[];
+  body: Coordinate[];
   latency: string;
   head: Coordinate;
-  length: number;
-  shout: string;
-  squad: string;
+  length?: number;
+  shout?: string;
+  squad?: string;
 }
 
 export interface Board {
@@ -43,8 +43,8 @@ export interface You {
   latency: string;
   head: Coordinate;
   length: number;
-  shout: string;
-  squad: string;
+  shout?: string;
+  squad?: string;
 }
 
 export interface GameState {

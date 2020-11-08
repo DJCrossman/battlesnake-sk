@@ -1,76 +1,87 @@
 import { Injectable } from '@nestjs/common';
 import { BoundaryService } from '../boundary/boundary.service';
 import { Direction, DirectionEnum } from '../dtos/direction';
-import { Coordinate, GameState } from '../dtos/game-state';
+import { GameState } from '../dtos/game-state';
 import { MoveRank } from '../dtos/move-rank';
 
 @Injectable()
 export class MovementService {
+  random: boolean = true;
+
   constructor(private boundaryService: BoundaryService) {}
 
-  async calculateWeight(state: GameState, coord: Coordinate, weight: number): Promise<number> {
-    const options: Direction[] = Object.values(DirectionEnum).sort(() => Math.random() - 0.5)
-    if (weight < (1 / (state.board.height * 10))) {
-      return weight
+  async calculateWeight(
+    state: GameState,
+    move: Direction,
+    weight: number,
+  ): Promise<number> {
+    const options: Direction[] = this.random
+      ? Object.values(DirectionEnum).sort(() => Math.random() - 0.5)
+      : Object.values(DirectionEnum);
+    const newState: GameState = this.boundaryService.moveAsState(move, state)
+    if (weight < 1 / (state.board.height * 20)) {
+      return weight;
     }
-    let moves: MoveRank[]
-    if (this.boundaryService.withinSet(state.board.food, coord)) {
+    let moves: MoveRank[];
+    const isOnFoodSource = this.boundaryService.withinSet(
+      state.board.food,
+      newState.you.head,
+    );
+    if (isOnFoodSource) {
       moves = await Promise.all(
-        options.map((move) =>
+        options.map(m =>
           this.calculateMove(
-            {
-              ...state,
-              you: { ...state.you, body: [coord, ...state.you.body] },
-            },
-            move,
-            weight / 5
-          )
-        )
-      )
+            newState,
+            m,
+            weight / 2,
+          ),
+        ),
+      );
     } else {
       moves = await Promise.all(
-        options.map((move) =>
+        options.map(m =>
           this.calculateMove(
-            {
-              ...state,
-              you: {
-                ...state.you,
-                body: [
-                  coord,
-                  ...[...state.you.body].slice(0, state.you.body.length - 1),
-                ],
-              },
-            },
-            move,
-            weight / 10
-          )
-        )
-      )
+            newState,
+            m,
+            weight / 3,
+          ),
+        ),
+      );
     }
-    const projectedWeight = moves.reduce((a, b) => a + b.weight, 0) / moves.length
-    console.log(`${state.turn} - ${projectedWeight}`)
-    return projectedWeight + (weight / 5)
+    const projectedWeight =
+      moves.reduce((a, b) => a + b.weight, 0) / moves.length;
+    return projectedWeight + weight / 2;
   }
 
-  async calculateMove(state: GameState, move: Direction, weight: number): Promise<MoveRank> {
-    const head: Coordinate = state.you.head
-    const coord: Coordinate = this.boundaryService.moveAsCoord(move, head)
-    if (!this.boundaryService.offBoard(state, coord) && !this.boundaryService.withinSet(state.you.body, coord)) {
-      const _weight = await this.calculateWeight(state, coord, weight)
-      return { move, weight: _weight }
+  async calculateMove(
+    state: GameState,
+    move: Direction,
+    weight: number,
+  ): Promise<MoveRank> {
+    const newState: GameState = this.boundaryService.moveAsState(move, state)
+    const isOffTheBoard = this.boundaryService.offBoard(state, newState.you.head);
+    const isWithinOwnBody = this.boundaryService.withinSet(
+      newState.you.body.slice(1, newState.you.body.length),
+      newState.you.head,
+    );
+    const isWithinAnotherSnake = state.board.snakes.some(s => this.boundaryService.withinSet(s.body, newState.you.head))
+    if (!isOffTheBoard && !isWithinOwnBody && !isWithinAnotherSnake) {
+      const _weight = await this.calculateWeight(state, move, weight);
+      return { move, weight: _weight };
     }
-    return { move, weight: 0 }
+    return { move, weight: 0 };
   }
 
   async findMove(state: GameState, weight: number): Promise<MoveRank> {
-    const options: Direction[] = Object.values(DirectionEnum).sort(() => Math.random() - 0.5)
+    const options: Direction[] = this.random
+      ? Object.values(DirectionEnum).sort(() => Math.random() - 0.5)
+      : Object.values(DirectionEnum);
     const moves: MoveRank[] = await Promise.all(
-      options.map((move) => this.calculateMove(state, move, weight))
-    )
-    console.log(`${state.turn} - ${weight} - ${JSON.stringify(state.you.head)}`, JSON.stringify(moves))
+      options.map(move => this.calculateMove(state, move, weight)),
+    );
     return moves.reduce((a, b) => (a.weight >= b.weight ? a : b), {
-      move: 'up',
+      move: 'right',
       weight: 0,
-    })
+    });
   }
 }
