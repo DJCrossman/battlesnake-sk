@@ -8,7 +8,7 @@ import { MoveRank } from '../dtos/move-rank';
 export class MovementService {
   random: boolean = true;
 
-  private foodWeight = 0.6
+  private foodWeight = 0.7
   private conflictWeight = 0.4
   private defaultWeight = 0.5
 
@@ -23,7 +23,7 @@ export class MovementService {
       ? Object.values(DirectionEnum).sort(() => Math.random() - 0.5)
       : Object.values(DirectionEnum);
     const newState: GameState = this.boundaryService.moveAsState(move, state)
-    if (weight < 1 / (state.board.height * 20)) {
+    if (weight < (1 / (state.board.height * 20))) {
       return weight;
     }
     let moves: MoveRank[];
@@ -39,7 +39,8 @@ export class MovementService {
         newState.you.head,
       )
     }))).some(m => m)
-    if (hasConflictPotential) {
+    const isHungry = state.you.health < 40
+    if (hasConflictPotential && !isHungry) {
       moves = await Promise.all(
         options.map(m =>
           this.calculateMove(
