@@ -3,7 +3,6 @@ import { GameState } from './dtos/game-state';
 import { Personalization } from './dtos/personalization';
 import { SnakeCommand } from './dtos/snake-command';
 import { MovementService } from './movement/movement.service';
-import * as fs from 'fs';
 
 @Injectable()
 export class AppService {
@@ -17,7 +16,7 @@ export class AppService {
     return {
       apiversion: '1',
       author: 'David Crossman',
-      color: '#ff69b4',
+      color: '#0069b4',
       head: 'bendr',
       tail: 'freckled',
     };
@@ -39,13 +38,5 @@ export class AppService {
 
   public async end(state: GameState): Promise<void> {
     Logger.log(`Ending [${state.game.id}].`, 'AppService');
-    const name = `${__dirname}/../tmp/${(new Date().getTime() / 1000).toFixed(0)}-${
-      state.game.id
-    }.json`;
-    fs.writeFile(name, JSON.stringify(this.history, null, 2), err =>
-      err
-        ? Logger.error(err.message, err.stack, 'AppService')
-        : Logger.log(`Save to ${name}`, 'AppService'),
-    );
   }
 }
