@@ -16,7 +16,7 @@ export class AppService {
     return {
       apiversion: '1',
       author: 'David Crossman',
-      color: '#0069b4',
+      color: '#ff69b4',
       head: 'bendr',
       tail: 'freckled',
     };
