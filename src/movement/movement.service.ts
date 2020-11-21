@@ -8,7 +8,7 @@ import { MoveRank } from '../dtos/move-rank';
 export class MovementService {
   random: boolean = true;
 
-  private foodWeight = 0.7
+  private foodWeight = 0.8
   private conflictWeight = 0.4
   private defaultWeight = 0.5
 
@@ -34,12 +34,13 @@ export class MovementService {
     const hasConflictPotential = (await Promise.all(newState.board.snakes.map((snake: Snake): boolean => {
       if (snake.id === newState.you.id) return false
       const snakeMoves: Coordinate[] = options.map((m: Direction) => this.boundaryService.moveAsCoord(m, snake.head))
-      return this.boundaryService.withinSet(
+      const isSmallerSnake = snake.body.length > newState.you.body.length
+      return isSmallerSnake && this.boundaryService.withinSet(
         snakeMoves,
         newState.you.head,
       )
     }))).some(m => m)
-    const isHungry = state.you.health < 40
+    const isHungry = state.you.health < 70
     if (hasConflictPotential && !isHungry) {
       moves = await Promise.all(
         options.map(m =>
