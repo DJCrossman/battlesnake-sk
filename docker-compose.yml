@@ -1,0 +1,19 @@
+name: battlesnake
+services:
+  battlesnake:
+    container_name: battlesnake
+    build:
+      context: ./
+      dockerfile: ./Dockerfile
+    command: 'yarn run start:dev --debug 0.0.0.0:9229'
+    working_dir: /app
+    volumes:
+      - ./:/app
+    expose:
+      - '3000'
+      - '9229'
+    ports:
+      - '3000:3000'
+      - '9229:9229'
+    env_file:
+      - ./.env

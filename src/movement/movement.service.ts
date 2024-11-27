@@ -8,7 +8,7 @@ import { MoveRank } from '../dtos/move-rank';
 export class MovementService {
   random: boolean = true;
 
-  private foodWeight = 0.8
+  private foodWeight = 0.9
   private conflictWeight = 0.4
   private defaultWeight = 0.5
 
