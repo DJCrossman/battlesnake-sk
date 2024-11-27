@@ -11,11 +11,6 @@ export class AppService {
     this.history = [];
   }
 
-  isSnakeDead(): boolean {
-    const [previous, current] = this.history.slice(-2)
-    return previous && current && previous.board.snakes.length > current.board.snakes.length
-  }
-
   public async getSnake(): Promise<Personalization> {
     Logger.log(`Getting snake...`, 'AppService');
     return {
@@ -29,14 +24,11 @@ export class AppService {
 
   public async start(state: GameState): Promise<void> {
     Logger.log(`Starting [${state.game.id}]...`, 'AppService');
-    this.history = []
   }
 
   public async move(state: GameState): Promise<SnakeCommand> {
     this.history.push(state);
     Logger.log(`Staring turn [${state.turn}]...`, 'AppService');
-    let shout: string
-    if (this.isSnakeDead()) shout = 'f'
     const { move } = await this.moveService.findMove(state, 1);
     Logger.log(`Moving [${move}] on turn ${state.turn}`, 'AppService');
     return {
