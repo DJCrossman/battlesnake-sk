@@ -3,6 +3,7 @@ import { GameState } from './dtos/game-state';
 import { Personalization } from './dtos/personalization';
 import { SnakeCommand } from './dtos/snake-command';
 import { MovementService } from './movement/movement.service';
+import { default as packageJson } from '../package.json';
 
 @Injectable()
 export class AppService {
@@ -19,6 +20,7 @@ export class AppService {
       color: process.env.SNAKE_COLOUR || '#DD69b4',
       head: 'bendr',
       tail: 'freckled',
+      version: packageJson.version,
     };
   }
 
@@ -42,6 +44,7 @@ export class AppService {
     Logger.log(`Game ended with ${isWin ? 'win' : 'loss'}.`, 'AppService', {
       moves: this.history.length,
       weights: this.moveService.WEIGHTS,
+      version: packageJson.version,
     });
   }
 }
