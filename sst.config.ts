@@ -24,6 +24,15 @@ export default $config({
       loadBalancer: {
         ports: [{ listen: "80/http" }]
       },
+      memory: '1 GB',
+      cpu: '2 vCPU',
+      health: {
+        command: ["CMD", "curl -f http://localhost:80/ || exit 1"],
+        startPeriod: "60 seconds",
+        timeout: "5 seconds",
+        interval: "30 seconds",
+        retries: 3,
+      }
     });
   },
 });
