@@ -8,17 +8,26 @@ import { MoveRank } from '../dtos/move-rank';
 export class MovementService {
   random: boolean = true;
 
-  private foodWeight = 0.9
+  private startTimeMs: number
+
   private conflictWeight = 0.4
   private defaultWeight = 0.5
 
   constructor(private boundaryService: BoundaryService) {}
+
+  private isTimeToMove(): boolean {
+    return performance.now() - this.startTimeMs < 300
+  }
 
   async calculateWeight(
     state: GameState,
     move: Direction,
     weight: number,
   ): Promise<number> {
+    if (!this.isTimeToMove()) {
+      Logger.warn('Time to move exceeded', 'MovementService')
+      return weight
+    }
     const options: Direction[] = this.random
       ? Object.values(DirectionEnum).sort(() => Math.random() - 0.5)
       : Object.values(DirectionEnum);
@@ -97,6 +106,7 @@ export class MovementService {
   }
 
   async findMove(state: GameState, weight: number): Promise<MoveRank> {
+    this.startTimeMs = performance.now()
     const options: Direction[] = this.random
       ? Object.values(DirectionEnum).sort(() => Math.random() - 0.5)
       : Object.values(DirectionEnum);
