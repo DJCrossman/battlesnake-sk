@@ -137,9 +137,14 @@ export class MovementService {
     const moves: MoveRank[] = await Promise.all(
       options.map(move => this.calculateMove(state, move, weight)),
     );
-    return moves.reduce((a, b) => (a.weight >= b.weight ? a : b), {
+    const move =  moves.reduce((a, b) => (a.weight >= b.weight ? a : b), {
       move: 'right',
       weight: 0,
     });
+    Logger.debug(`Moving [${move.move}] with weight [${move.weight}] on turn ${state.turn}`, 'MovementService', {
+      moves,
+      move,
+    });
+    return move
   }
 }

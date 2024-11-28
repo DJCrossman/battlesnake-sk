@@ -28,7 +28,8 @@
     "dotenv": "^16.4.5",
     "reflect-metadata": "^0.2.0",
     "rxjs": "^7.8.1",
-    "sst": "^3.3.30"
+    "sst": "^3.3.30",
+    "winston": "^3.17.0"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.0.0",

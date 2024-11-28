@@ -31,7 +31,6 @@ export class AppService {
     this.history.push(state);
     Logger.log(`Staring turn [${state.turn}]...`, 'AppService');
     const { move } = await this.moveService.findMove(state, 1);
-    Logger.log(`Moving [${move}] on turn ${state.turn}`, 'AppService');
     return {
       move,
     };
@@ -40,6 +39,9 @@ export class AppService {
   public async end(state: GameState): Promise<void> {
     Logger.log(`Ending [${state.game.id}].`, 'AppService');
     const isWin = state.you.id === state.board.snakes[0].id;
-    Logger.log(`Game ended with ${isWin ? 'win' : 'loss'} and ${this.history.length} moves using weights ${JSON.stringify(this.moveService.WEIGHTS)}.`, 'AppService');
+    Logger.log(`Game ended with ${isWin ? 'win' : 'loss'}.`, 'AppService', {
+      moves: this.history.length,
+      weights: this.moveService.WEIGHTS,
+    });
   }
 }
