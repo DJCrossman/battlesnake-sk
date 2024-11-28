@@ -13,6 +13,14 @@ export class MovementService {
   private conflictWeight = 0.4
   private defaultWeight = 0.5
 
+  get WEIGHTS() {
+    return {
+      food: this.foodWeight,
+      conflict: this.conflictWeight,
+      default: this.defaultWeight,
+    };
+  }
+
   constructor(private boundaryService: BoundaryService) {}
 
   private isTimeToMove(): boolean {

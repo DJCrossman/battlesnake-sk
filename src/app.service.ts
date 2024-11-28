@@ -24,6 +24,7 @@ export class AppService {
 
   public async start(state: GameState): Promise<void> {
     Logger.log(`Starting [${state.game.id}]...`, 'AppService');
+    this.history = [];
   }
 
   public async move(state: GameState): Promise<SnakeCommand> {
@@ -38,5 +39,7 @@ export class AppService {
 
   public async end(state: GameState): Promise<void> {
     Logger.log(`Ending [${state.game.id}].`, 'AppService');
+    const isWin = state.you.id === state.board.snakes[0].id;
+    Logger.log(`Game ended with ${isWin ? 'win' : 'loss'} and ${this.history.length} moves using weights ${JSON.stringify(this.moveService.WEIGHTS)}.`, 'AppService');
   }
 }
