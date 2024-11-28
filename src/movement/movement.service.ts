@@ -9,6 +9,7 @@ export class MovementService {
   random: boolean = true;
 
   private startTimeMs: number
+  private maxTimeMs: number = 250
 
   private foodWeight = 0.8
   private conflictWeight = 0.4
@@ -25,7 +26,7 @@ export class MovementService {
   constructor(private boundaryService: BoundaryService) {}
 
   private isTimeToMove(): boolean {
-    return performance.now() - this.startTimeMs < 300
+    return performance.now() - this.startTimeMs < this.maxTimeMs
   }
 
   async calculateWeight(
@@ -34,7 +35,10 @@ export class MovementService {
     weight: number,
   ): Promise<number> {
     if (!this.isTimeToMove()) {
-      Logger.warn('Time to move exceeded', 'MovementService')
+      Logger.warn('Time to move exceeded', 'MovementService', {
+        maxTimeMs: this.maxTimeMs,
+        startTimeMs: this.startTimeMs,
+      })
       return weight
     }
     const options: Direction[] = this.random
