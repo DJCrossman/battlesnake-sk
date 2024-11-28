@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { BoundaryService } from '../boundary/boundary.service';
 import { Direction, DirectionEnum } from '../dtos/direction';
 import { Coordinate, GameState, Snake } from '../dtos/game-state';
@@ -10,6 +10,7 @@ export class MovementService {
 
   private startTimeMs: number
 
+  private foodWeight = 0.8
   private conflictWeight = 0.4
   private defaultWeight = 0.5
 
@@ -50,6 +51,7 @@ export class MovementService {
     );
     const hasConflictPotential = (await Promise.all(newState.board.snakes.map((snake: Snake): boolean => {
       if (snake.id === newState.you.id) return false
+      if (this.boundaryService.withinSet(snake.body, newState.you.head)) return true
       const snakeMoves: Coordinate[] = options.map((m: Direction) => this.boundaryService.moveAsCoord(m, snake.head))
       const isSmallerSnake = snake.body.length > newState.you.body.length
       return isSmallerSnake && this.boundaryService.withinSet(
@@ -106,9 +108,23 @@ export class MovementService {
       newState.you.head,
     );
     const isWithinAnotherSnake = state.board.snakes.some(s => this.boundaryService.withinSet(s.body, newState.you.head))
-    if (!isOffTheBoard && !isWithinOwnBody && !isWithinAnotherSnake) {
-      const _weight = await this.calculateWeight(state, move, weight);
-      return { move, weight: _weight };
+    const isSmallerAndWithinAnotherSnakeMove = state.board.snakes.some(s => {
+      if (s.id === newState.you.id) return false
+      const snakeMoves: Coordinate[] = Object.values(DirectionEnum).map((m: Direction) => this.boundaryService.moveAsCoord(m, s.head))
+      const isSmallerSnake = s.body.length > newState.you.body.length
+      return isSmallerSnake && this.boundaryService.withinSet(
+        snakeMoves,
+        newState.you.head,
+      )
+    })
+    if (!isOffTheBoard && !isWithinOwnBody && !isWithinAnotherSnake && !isSmallerAndWithinAnotherSnakeMove) {
+      try {
+        const _weight = await this.calculateWeight(state, move, weight);
+        return { move, weight: _weight };
+      } catch (e) {
+        Logger.error(e, 'MovementService');
+        return { move, weight: 0 };
+      }
     }
     return { move, weight: 0 };
   }
