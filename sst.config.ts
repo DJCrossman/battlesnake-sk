@@ -25,7 +25,7 @@ export default $config({
         ports: [{ listen: "80/http" }]
       },
       memory: '1 GB',
-      cpu: '2 vCPU',
+      cpu: '1 vCPU',
       health: {
         command: ["CMD", "curl -f http://localhost:80/ || exit 1"],
         startPeriod: "60 seconds",
