@@ -24,7 +24,7 @@ export default $config({
       loadBalancer: {
         ports: [{ listen: "80/http" }]
       },
-      memory: '1 GB',
+      memory: '2 GB',
       cpu: '1 vCPU',
       health: {
         command: ["CMD", "curl -f http://localhost:80/ || exit 1"],
