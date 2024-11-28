@@ -23,7 +23,7 @@ export class MovementService {
     };
   }
 
-  constructor(private boundaryService: BoundaryService) {}
+  constructor(private boundaryService: BoundaryService) { }
 
   private isTimeToMove(): boolean {
     return performance.now() - this.startTimeMs < this.maxTimeMs
@@ -35,10 +35,12 @@ export class MovementService {
     weight: number,
   ): Promise<number> {
     if (!this.isTimeToMove()) {
-      Logger.warn('Time to move exceeded', 'MovementService', {
-        maxTimeMs: this.maxTimeMs,
-        startTimeMs: this.startTimeMs,
-      })
+      if (weight === 1) {
+        Logger.warn('Time to move exceeded', 'MovementService', {
+          maxTimeMs: this.maxTimeMs,
+          startTimeMs: this.startTimeMs,
+        })
+      }
       return weight
     }
     const options: Direction[] = this.random
@@ -141,7 +143,7 @@ export class MovementService {
     const moves: MoveRank[] = await Promise.all(
       options.map(move => this.calculateMove(state, move, weight)),
     );
-    const move =  moves.reduce((a, b) => (a.weight >= b.weight ? a : b), {
+    const move = moves.reduce((a, b) => (a.weight >= b.weight ? a : b), {
       move: 'right',
       weight: 0,
     });
