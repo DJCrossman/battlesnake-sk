@@ -40,7 +40,7 @@ export class BoundaryService {
     if (coord.x < 0) return true;
     if (coord.y < 0) return true;
     if (coord.y >= state.board.height) return true;
-    if (coord.x >= state.board.height) return true;
+    if (coord.x >= state.board.width) return true;
     return false; // If it makes it here we are ok.
   }
 
@@ -50,5 +50,49 @@ export class BoundaryService {
 
   coordEqual(a: Coordinate, b: Coordinate): boolean {
     return a.x === b.x && a.y === b.y;
+  }
+
+  // Calculate available space from a position using flood fill
+  floodFill(state: GameState, start: Coordinate, maxDepth: number = 50): number {
+    const visited = new Set<string>();
+    const queue: Coordinate[] = [start];
+    let count = 0;
+
+    // Create obstacle set for faster lookup
+    const obstacles = new Set<string>();
+    state.board.snakes.forEach(snake => {
+      snake.body.forEach(segment => {
+        obstacles.add(`${segment.x},${segment.y}`);
+      });
+    });
+    state.board.hazards.forEach(hazard => {
+      obstacles.add(`${hazard.x},${hazard.y}`);
+    });
+
+    while (queue.length > 0 && count < maxDepth) {
+      const current = queue.shift()!;
+      const key = `${current.x},${current.y}`;
+
+      if (visited.has(key)) continue;
+      visited.add(key);
+      count++;
+
+      // Check all 4 directions
+      const directions: Direction[] = ['up', 'down', 'left', 'right'];
+      for (const dir of directions) {
+        const next = this.moveAsCoord(dir, current);
+        const nextKey = `${next.x},${next.y}`;
+
+        if (
+          !visited.has(nextKey) &&
+          !obstacles.has(nextKey) &&
+          !this.offBoard(state, next)
+        ) {
+          queue.push(next);
+        }
+      }
+    }
+
+    return count;
   }
 }

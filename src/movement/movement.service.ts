@@ -11,9 +11,10 @@ export class MovementService {
   private startTimeMs: number
   private maxTimeMs: number = 250
 
-  private foodWeight = 0.8
-  private conflictWeight = 0.4
-  private defaultWeight = 0.5
+  private foodWeight = 0.85
+  private conflictWeight = 0.3
+  private defaultWeight = 0.55
+  private spaceWeight = 0.7
 
   get WEIGHTS() {
     return {
@@ -27,6 +28,19 @@ export class MovementService {
 
   private isTimeToMove(): boolean {
     return performance.now() - this.startTimeMs < this.maxTimeMs
+  }
+
+  private getManhattanDistance(a: Coordinate, b: Coordinate): number {
+    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+  }
+
+  private getClosestFood(state: GameState): Coordinate | null {
+    if (state.board.food.length === 0) return null;
+    return state.board.food.reduce((closest, food) => {
+      const distToFood = this.getManhattanDistance(state.you.head, food);
+      const distToClosest = this.getManhattanDistance(state.you.head, closest);
+      return distToFood < distToClosest ? food : closest;
+    });
   }
 
   async calculateWeight(
@@ -55,17 +69,22 @@ export class MovementService {
       state.board.food,
       newState.you.head,
     );
+    const closestFood = this.getClosestFood(state);
+    const isMovingTowardFood = closestFood ? 
+      this.getManhattanDistance(newState.you.head, closestFood) < this.getManhattanDistance(state.you.head, closestFood) : false;
     const hasConflictPotential = (await Promise.all(newState.board.snakes.map((snake: Snake): boolean => {
       if (snake.id === newState.you.id) return false
       if (this.boundaryService.withinSet(snake.body, newState.you.head)) return true
       const snakeMoves: Coordinate[] = options.map((m: Direction) => this.boundaryService.moveAsCoord(m, snake.head))
-      const isSmallerSnake = snake.body.length > newState.you.body.length
-      return isSmallerSnake && this.boundaryService.withinSet(
+      const isBiggerOrEqualSnake = snake.body.length >= newState.you.body.length
+      return isBiggerOrEqualSnake && this.boundaryService.withinSet(
         snakeMoves,
         newState.you.head,
       )
     }))).some(m => m)
-    const isHungry = state.you.health < 70
+    const isHungry = state.you.health < 60
+    const isVeryHungry = state.you.health < 30
+    
     if (hasConflictPotential && !isHungry) {
       moves = await Promise.all(
         options.map(m =>
@@ -76,13 +95,23 @@ export class MovementService {
           ),
         ),
       );
-    } else if (isOnFoodSource) {
+    } else if (isOnFoodSource || (isVeryHungry && isMovingTowardFood)) {
       moves = await Promise.all(
         options.map(m =>
           this.calculateMove(
             newState,
             m,
             weight * this.foodWeight,
+          ),
+        ),
+      );
+    } else if (isHungry && isMovingTowardFood) {
+      moves = await Promise.all(
+        options.map(m =>
+          this.calculateMove(
+            newState,
+            m,
+            weight * this.spaceWeight,
           ),
         ),
       );
@@ -114,19 +143,24 @@ export class MovementService {
       newState.you.head,
     );
     const isWithinAnotherSnake = state.board.snakes.some(s => this.boundaryService.withinSet(s.body, newState.you.head))
-    const isSmallerAndWithinAnotherSnakeMove = state.board.snakes.some(s => {
+    const isBiggerOrEqualAndWithinAnotherSnakeMove = state.board.snakes.some(s => {
       if (s.id === newState.you.id) return false
       const snakeMoves: Coordinate[] = Object.values(DirectionEnum).map((m: Direction) => this.boundaryService.moveAsCoord(m, s.head))
-      const isSmallerSnake = s.body.length > newState.you.body.length
-      return isSmallerSnake && this.boundaryService.withinSet(
+      const isBiggerOrEqualSnake = s.body.length >= newState.you.body.length
+      return isBiggerOrEqualSnake && this.boundaryService.withinSet(
         snakeMoves,
         newState.you.head,
       )
     })
-    if (!isOffTheBoard && !isWithinOwnBody && !isWithinAnotherSnake && !isSmallerAndWithinAnotherSnakeMove) {
+    const isInHazard = this.boundaryService.withinSet(state.board.hazards, newState.you.head)
+    
+    if (!isOffTheBoard && !isWithinOwnBody && !isWithinAnotherSnake && !isBiggerOrEqualAndWithinAnotherSnakeMove && !isInHazard) {
       try {
         const _weight = await this.calculateWeight(state, move, weight);
-        return { move, weight: _weight };
+        // Add space evaluation bonus - more space = better move
+        const availableSpace = this.boundaryService.floodFill(newState, newState.you.head, 30);
+        const spaceBonus = Math.min(availableSpace / 30, 1.0); // Normalize to 0-1 range
+        return { move, weight: _weight + (spaceBonus * 0.2) };
       } catch (e) {
         Logger.error(e, 'MovementService');
         return { move, weight: 0 };
