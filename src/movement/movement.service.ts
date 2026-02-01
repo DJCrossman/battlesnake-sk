@@ -49,14 +49,14 @@ export class MovementService {
     weight: number,
   ): Promise<number> {
     if (!this.isTimeToMove()) {
-      if (weight === 1) {
-        Logger.warn('Time to move exceeded', 'MovementService', {
-          maxTimeMs: this.maxTimeMs,
-          startTimeMs: this.startTimeMs,
-        })
-      }
+      Logger.warn('Time to move exceeded', 'MovementService', {
+        weight,
+        maxTimeMs: this.maxTimeMs,
+        startTimeMs: this.startTimeMs,
+      })
       return weight
     }
+    await new Promise((resolve) => setTimeout(resolve, 200))
     const options: Direction[] = this.random
       ? Object.values(DirectionEnum).sort(() => Math.random() - 0.5)
       : Object.values(DirectionEnum);
