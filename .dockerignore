@@ -1,0 +1,4 @@
+# The image is built from server/ only
+*
+!server
+server/target

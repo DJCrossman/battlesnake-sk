@@ -1,9 +1,9 @@
-FROM node:22-alpine
-WORKDIR /app/
+FROM rust:1-slim-trixie AS build
+WORKDIR /app
+COPY server/ .
+RUN cargo build --release --locked
 
-COPY . .
-
-RUN apk --no-cache add curl
-
-CMD yarn run start:prod
+FROM debian:trixie-slim
+COPY --from=build /app/target/release/battlesnake-sk /usr/local/bin/battlesnake-sk
 EXPOSE 80
+CMD ["battlesnake-sk"]

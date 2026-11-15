@@ -5,19 +5,11 @@ services:
     build:
       context: ./
       dockerfile: ./Dockerfile
-    command: 'yarn run start:dev --debug 0.0.0.0:9229'
-    working_dir: /app
-    volumes:
-      - ./:/app
+    environment:
+      - PORT=3000
     expose:
       - '3000'
     ports:
       - '3000:3000'
     env_file:
       - ./.env
-    healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://localhost:3000']
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
