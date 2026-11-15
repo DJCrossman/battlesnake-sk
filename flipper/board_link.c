@@ -406,8 +406,9 @@ static void board_link_draw_cell(Canvas* canvas, BoardCell cell, uint8_t px, uin
     case BoardCellMyHead:
         canvas_draw_box(canvas, px, py, size, size);
         if(size >= 3) {
+            const uint8_t hole = size >= 8 ? size / 4 : 1;
             canvas_set_color(canvas, ColorWhite);
-            canvas_draw_dot(canvas, px + mid, py + mid);
+            canvas_draw_box(canvas, px + (size - hole) / 2, py + (size - hole) / 2, hole, hole);
             canvas_set_color(canvas, ColorBlack);
         }
         break;
