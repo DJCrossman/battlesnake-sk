@@ -1,0 +1,14 @@
+App(
+    appid="snake_pad",
+    name="Snake Pad",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="snake_pad_app",
+    stack_size=2 * 1024,
+    sources=["snake_pad.c"],
+    fap_libs=["ble_profile"],
+    fap_category="Bluetooth",
+    fap_icon="snake_pad_10px.png",
+    fap_version="1.0",
+    fap_author="David Crossman",
+    fap_description="Steer a Battlesnake: Bluetooth keyboard arrow keys from the D-pad",
+)
