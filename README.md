@@ -1,75 +1,125 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo_text.svg" width="320" alt="Nest Logo" /></a>
-</p>
+# battlesnake-sk
 
-[travis-image]: https://api.travis-ci.org/nestjs/nest.svg?branch=master
-[travis-url]: https://travis-ci.org/nestjs/nest
-[linux-image]: https://img.shields.io/travis/nestjs/nest/master.svg?label=linux
-[linux-url]: https://travis-ci.org/nestjs/nest
-  
-  <p align="center">A progressive <a href="http://nodejs.org" target="blank">Node.js</a> framework for building efficient and scalable server-side applications, heavily inspired by <a href="https://angular.io" target="blank">Angular</a>.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore"><img src="https://img.shields.io/npm/dm/@nestjs/core.svg" alt="NPM Downloads" /></a>
-<a href="https://travis-ci.org/nestjs/nest"><img src="https://api.travis-ci.org/nestjs/nest.svg?branch=master" alt="Travis" /></a>
-<a href="https://travis-ci.org/nestjs/nest"><img src="https://img.shields.io/travis/nestjs/nest/master.svg?label=linux" alt="Linux" /></a>
-<a href="https://coveralls.io/github/nestjs/nest?branch=master"><img src="https://coveralls.io/repos/github/nestjs/nest/badge.svg?branch=master#5" alt="Coverage" /></a>
-<a href="https://gitter.im/nestjs/nestjs?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=body_badge"><img src="https://badges.gitter.im/nestjs/nestjs.svg" alt="Gitter" /></a>
-<a href="https://opencollective.com/nest#backer"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec"><img src="https://img.shields.io/badge/Donate-PayPal-dc3d53.svg"/></a>
-  <a href="https://twitter.com/nestframework"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+A [Battlesnake](https://play.battlesnake.com) you steer in real time from a Flipper Zero, with an
+autopilot behind you.
 
-## Description
-
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Installation
-
-```bash
-$ npm install
+```
+Flipper Zero ──Bluetooth keyboard──▶ phone browser (/pad) ──WebSocket──▶ server ◀──/move── Battlesnake engine
+ Snake Pad app                        live board + key relay              Rust, in memory
 ```
 
-## Running the app
+- **`flipper/`** – the Snake Pad app. The Flipper pairs with your phone as a Bluetooth keyboard; the
+  D-pad sends arrow keys.
+- **`server/`** – the Battlesnake server (Rust, axum). It also serves `/pad`, the page you keep open
+  on the phone: it draws the live board and relays each key press to the server as one byte over a
+  WebSocket.
+
+## How a move is decided
+
+When the engine asks for a move, the server answers **the instant you press a direction** (a press
+that is already waiting counts). If you press nothing it waits as long as it safely can — the game's
+timeout minus the engine's measured overhead and a 50 ms margin — and then falls back. Up to two
+presses are queued, so a quick double turn works. A press back into your own neck is ignored.
+
+| Mode | A press | No press by the deadline |
+| --- | --- | --- |
+| `assist` (default) | played, unless it is certain death (wall or body) | straight on, or the autopilot if straight is certain death |
+| `manual` | played as-is | straight on, even into a wall |
+| `auto` | ignored | the autopilot answers immediately |
+
+With no pad connected the autopilot plays every game and answers in well under a millisecond. The
+pad steers one snake in one game at a time — the game that started most recently; any other game
+running at the same time stays on autopilot. A phone that drops off the network is noticed within
+6 seconds, after which the autopilot takes over again.
+
+In `assist` the snake only keeps going straight for you; it does not look for food. Switch to
+`auto` (or close the page) when you are not steering.
+
+The page draws the board straight from the server: it appears when the game is created, updates
+the moment the engine asks for each move, and moves your own snake as soon as your move is
+committed, so what you see is the position your next press applies to.
+
+## Controls
+
+| Flipper button | Sends | Effect |
+| --- | --- | --- |
+| D-pad | Arrow keys (or W/A/S/D) | steer |
+| OK | Space | next mode: assist → manual → auto |
+| Back | – | switch between Arrow keys and W/A/S/D |
+| Hold Back | – | exit and restore the Flipper's normal Bluetooth |
+
+Each press sends a single key tap, so holding a button does not repeat. The pad page takes the same
+keys from any keyboard, which is handy for testing without the Flipper.
+
+## Run it locally
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+cd server
+PORT=8000 CONTROL_TOKEN=dev cargo run --release
 ```
 
-## Test
+Open <http://localhost:8000/pad#dev>, then start a game with the
+[Battlesnake CLI](https://github.com/BattlesnakeOfficial/rules/tree/main/cli):
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+battlesnake play -W 11 -H 11 --name me --url http://localhost:8000 -g solo
 ```
 
-## Support
+| Variable | Default | |
+| --- | --- | --- |
+| `PORT` | `80` | port to listen on |
+| `CONTROL_TOKEN` | random, logged at boot | the secret after `#` in the pad URL |
+| `SNAKE_COLOUR` | `#DD69b4` | snake colour |
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+`cargo test` runs the unit and integration tests.
 
-## Stay in touch
+## Flipper app
 
-- Author - [Kamil Myśliwiec](https://kamilmysliwiec.com)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+Build with [ufbt](https://github.com/flipperdevices/flipperzero-ufbt). The SDK has to match the
+firmware on the Flipper (Settings → About). For Unleashed `unlshd-090`:
 
-## License
+```bash
+ufbt update --hw-target f7 --url https://github.com/DarkFlippers/unleashed-firmware/releases/download/unlshd-090/flipper-z-f7-sdk-unlshd-090.zip
+```
 
-  Nest is [MIT licensed](LICENSE).
+Then, with the Flipper connected over USB:
+
+```bash
+cd flipper
+ufbt launch
+```
+
+That installs the app under Apps → Bluetooth → Snake Pad and starts it.
+
+To play:
+
+1. Start Snake Pad on the Flipper. It advertises as `Snake <your Flipper's name>`.
+2. Pair with it in the phone's Bluetooth settings. This pairing is separate from the Flipper mobile
+   app's; that one is untouched.
+3. Open `http://<your server>/pad#<CONTROL_TOKEN>` on the phone and tap the page once. A banner
+   shows whenever the page needs that tap.
+4. Start a game. The board appears as soon as the game is created.
+
+If the page does not react to the D-pad on an iPhone or iPad, press Back on the Flipper to switch to
+W/A/S/D. Some iOS versions do not pass key events from this kind of Bluetooth keyboard to web pages,
+but typed letters still arrive; the page's "Last key via" tile shows which path delivered a press.
+
+## Deploy
+
+Pushing to `main` deploys to AWS (ECS, via SST) from `.github/workflows/deploy.yml`; the image is
+built from `Dockerfile`.
+
+- The server keeps the game and pad state in memory, so it must run as exactly one task.
+- Set `CONTROL_TOKEN` on the service. Without it a new token is generated at every start and written
+  to the log.
+- The load balancer listens on plain HTTP, so the token is not encrypted in transit and the page
+  cannot keep the phone's screen awake (that needs HTTPS).
+- `/start`, `/move` and `/end` are open, as the Battlesnake API requires. Someone who knows the URL
+  can start a game against the snake, and the pad follows the most recently started game.
+
+## Limits
+
+- The autopilot is a port of the original TypeScript heuristics. Like the original it treats
+  hazards as walls and does not know about wrapped boards. It looks five moves ahead where the
+  original effectively managed two, so it can choose differently.
+- Boards larger than 50×50 are refused.
