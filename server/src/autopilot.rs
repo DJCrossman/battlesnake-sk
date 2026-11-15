@@ -6,10 +6,11 @@
 
 use crate::game::{Direction, GameState, Point};
 
-/// Expansions below the root before a branch is scored by its weight alone. The original had no
-/// depth limit and was cut off by a 250 ms clock instead; this keeps the worst case (an open board
-/// with three safe moves at every step, about 1,100 nodes) near 0.16 ms in a release build. Each
-/// extra level triples it.
+/// Expansions below the root before a branch is scored by its weight alone. The original slept
+/// 200 ms per level against a 250 ms budget, so in practice it looked about two levels ahead;
+/// this port looks deeper and can therefore choose differently. Five levels keep the worst case
+/// (an open board with three safe moves at every step, about 1,100 nodes) near 0.16 ms in a
+/// release build; each extra level triples it.
 const MAX_DEPTH: usize = 5;
 /// The flood fill stops counting at this many cells; it is also the space bonus's denominator.
 const SPACE_CAP: usize = 30;
@@ -25,6 +26,18 @@ struct Cell {
     own_index: usize,
     /// Flood-fill generation that last reached this cell.
     seen: u32,
+}
+
+struct Search<'s, 'a> {
+    state: &'s GameState<'a>,
+    cells: Vec<Cell>,
+    /// `path[k]` is our head after move `k + 1` of the branch being explored.
+    path: [Point; MAX_DEPTH],
+    /// Our snake only grows while its body is exactly this long, as in the original.
+    length: usize,
+    stop_weight: f64,
+    generation: u32,
+    queue: [Point; 4 * SPACE_CAP + 8],
 }
 
 /// The autopilot's move: the highest-scoring direction, earliest in `Direction::ALL` on ties.
@@ -50,24 +63,13 @@ pub fn choose_move(state: &GameState) -> Direction {
 
 /// Each direction's look-ahead score, in `Direction::ALL` order. 0 means the move is ruled out.
 pub fn score_moves(state: &GameState) -> [f64; 4] {
-    if state.you.body.is_empty() || state.board.width <= 0 || state.board.height <= 0 {
+    // Board sides are 1..=50 by construction (see `game::Board`); an empty body is still possible.
+    if state.you.body.is_empty() {
         return [0.0; 4];
     }
     let mut search = Search::new(state);
     let body_len = state.you.body.len();
     Direction::ALL.map(|dir| search.score_move(state.you.head, dir, 1.0, 0, body_len))
-}
-
-struct Search<'s, 'a> {
-    state: &'s GameState<'a>,
-    cells: Vec<Cell>,
-    /// `path[k]` is our head after move `k + 1` of the branch being explored.
-    path: [Point; MAX_DEPTH],
-    /// Our snake only grows while its body is exactly this long, as in the original.
-    length: usize,
-    stop_weight: f64,
-    generation: u32,
-    queue: [Point; 4 * SPACE_CAP + 8],
 }
 
 impl<'s, 'a> Search<'s, 'a> {

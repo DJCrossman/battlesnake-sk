@@ -29,9 +29,16 @@ pub struct Game<'a> {
     pub timeout: u32,
 }
 
+/// The largest board side accepted. The official maps top out at 25; anything past this is refused
+/// when the payload is read, so the grids built from it stay small.
+pub const MAX_BOARD_SIDE: i32 = 50;
+
 #[derive(Debug, Deserialize)]
 pub struct Board<'a> {
+    /// 1..=`MAX_BOARD_SIDE`, enforced while deserializing.
+    #[serde(deserialize_with = "playable_side")]
     pub height: i32,
+    #[serde(deserialize_with = "playable_side")]
     pub width: i32,
     #[serde(default)]
     pub food: Vec<Point>,
@@ -133,6 +140,17 @@ impl GameState<'_> {
     }
 }
 
+fn playable_side<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i32, D::Error> {
+    let side = i64::deserialize(deserializer)?;
+    if (1..=i64::from(MAX_BOARD_SIDE)).contains(&side) {
+        Ok(side as i32)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "board side {side} is outside 1..={MAX_BOARD_SIDE}"
+        )))
+    }
+}
+
 fn default_timeout() -> u32 {
     500
 }
@@ -191,6 +209,23 @@ mod tests {
         assert!(!state.is_certain_death(Direction::Left));
         // Down is our own neck.
         assert!(state.is_certain_death(Direction::Down));
+    }
+
+    #[test]
+    fn boards_outside_1_to_50_are_refused() {
+        let parse = |width: i64, height: i64| {
+            serde_json::from_str::<GameState>(&format!(
+                r#"{{"board": {{"height": {height}, "width": {width}}},
+                    "you": {{"body": [{{"x":0,"y":0}}], "head": {{"x":0,"y":0}}}}}}"#
+            ))
+            .is_ok()
+        };
+        assert!(parse(1, 1));
+        assert!(parse(50, 50));
+        assert!(!parse(0, 11));
+        assert!(!parse(11, 51));
+        assert!(!parse(65536, 65536));
+        assert!(!parse(-11, 11));
     }
 
     #[test]

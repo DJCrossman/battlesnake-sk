@@ -13,10 +13,11 @@ type Pad = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const TOKEN: &str = "test-token";
 /// With the default 100 ms overhead and a 500 ms timeout the server holds for 350 ms.
 const HOLD: Duration = Duration::from_millis(350);
+const PAD_IDLE: Duration = Duration::from_secs(6);
 
 #[tokio::test]
 async fn wrong_token_is_rejected() {
-    let addr = spawn_server().await;
+    let addr = spawn_server(PAD_IDLE).await;
     let (mut pad, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
     pad.send(Message::text("not-the-token")).await.unwrap();
     match tokio::time::timeout(Duration::from_secs(2), pad.next())
@@ -30,26 +31,26 @@ async fn wrong_token_is_rejected() {
 
 #[tokio::test]
 async fn queued_input_answers_well_before_the_hold() {
-    let addr = spawn_server().await;
+    let addr = spawn_server(PAD_IDLE).await;
     let mut pad = connect_pad(&addr).await;
-    post(&addr, "/start", &game_state("g1")).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
     pad.send(Message::binary(vec![2u8])).await.unwrap();
     // The echo comes back after the server has handled the press sent before it.
     echo(&mut pad, vec![5, 1]).await;
 
-    let (answer, took) = post(&addr, "/move", &game_state("g1")).await;
+    let (answer, took) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
     assert_eq!(answer, r#"{"move":"left"}"#);
     assert!(took < Duration::from_millis(100), "{took:?}");
 }
 
 #[tokio::test]
 async fn input_during_the_hold_answers_at_once() {
-    let addr = spawn_server().await;
+    let addr = spawn_server(PAD_IDLE).await;
     let mut pad = connect_pad(&addr).await;
-    post(&addr, "/start", &game_state("g1")).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
     let request = tokio::spawn({
         let addr = addr.clone();
-        async move { post(&addr, "/move", &game_state("g1")).await }
+        async move { post(&addr, "/move", &game_state("g1", "me", 3)).await }
     });
     // Wait for the turn frame, then press right.
     next_text_containing(&mut pad, r#""t":"turn""#).await;
@@ -63,11 +64,11 @@ async fn input_during_the_hold_answers_at_once() {
 
 #[tokio::test]
 async fn no_input_goes_straight_after_the_hold() {
-    let addr = spawn_server().await;
+    let addr = spawn_server(PAD_IDLE).await;
     let mut pad = connect_pad(&addr).await;
-    post(&addr, "/start", &game_state("g1")).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
 
-    let (answer, took) = post(&addr, "/move", &game_state("g1")).await;
+    let (answer, took) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
     assert_eq!(answer, r#"{"move":"up"}"#);
     assert!(took >= HOLD - Duration::from_millis(10), "{took:?}");
     assert!(took < HOLD + Duration::from_millis(100), "{took:?}");
@@ -77,24 +78,24 @@ async fn no_input_goes_straight_after_the_hold() {
 
 #[tokio::test]
 async fn without_a_pad_the_autopilot_answers_immediately() {
-    let addr = spawn_server().await;
-    post(&addr, "/start", &game_state("g1")).await;
-    let (answer, took) = post(&addr, "/move", &game_state("g1")).await;
+    let addr = spawn_server(PAD_IDLE).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    let (answer, took) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
     assert!(answer.starts_with(r#"{"move":""#), "{answer}");
     assert!(took < Duration::from_millis(50), "{took:?}");
 }
 
 #[tokio::test]
 async fn auto_mode_answers_immediately() {
-    let addr = spawn_server().await;
+    let addr = spawn_server(PAD_IDLE).await;
     let mut pad = connect_pad(&addr).await;
-    post(&addr, "/start", &game_state("g1")).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
     pad.send(Message::binary(vec![4u8])).await.unwrap();
     next_text_containing(&mut pad, r#""mode":"manual""#).await;
     pad.send(Message::binary(vec![4u8])).await.unwrap();
     next_text_containing(&mut pad, r#""mode":"auto""#).await;
 
-    let (_, took) = post(&addr, "/move", &game_state("g1")).await;
+    let (_, took) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
     assert!(took < Duration::from_millis(50), "{took:?}");
     let moved = next_text_containing(&mut pad, r#""t":"moved""#).await;
     assert!(moved.contains(r#""source":"auto""#), "{moved}");
@@ -102,23 +103,23 @@ async fn auto_mode_answers_immediately() {
 
 #[tokio::test]
 async fn another_game_is_played_by_the_autopilot_without_waiting() {
-    let addr = spawn_server().await;
+    let addr = spawn_server(PAD_IDLE).await;
     let _pad = connect_pad(&addr).await;
-    post(&addr, "/start", &game_state("mine")).await;
-    let (_, took) = post(&addr, "/move", &game_state("someone-elses")).await;
+    post(&addr, "/start", &game_state("mine", "me", 3)).await;
+    let (_, took) = post(&addr, "/move", &game_state("someone-elses", "me", 3)).await;
     assert!(took < Duration::from_millis(50), "{took:?}");
 }
 
 #[tokio::test]
 async fn echo_frames_come_back_unchanged() {
-    let addr = spawn_server().await;
+    let addr = spawn_server(PAD_IDLE).await;
     let mut pad = connect_pad(&addr).await;
     echo(&mut pad, vec![5, 0, 1, 2, 3, 250]).await;
 }
 
 #[tokio::test]
 async fn describes_the_snake() {
-    let addr = spawn_server().await;
+    let addr = spawn_server(PAD_IDLE).await;
     let body = reqwest::get(format!("http://{addr}/"))
         .await
         .unwrap()
@@ -133,12 +134,166 @@ async fn describes_the_snake() {
     assert_eq!(value["tail"], "freckled");
 }
 
-async fn spawn_server() -> String {
+#[tokio::test]
+async fn oversized_boards_are_refused_and_the_server_keeps_answering() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let client = reqwest::Client::new();
+    for (path, side) in [
+        ("/start", 51),
+        ("/move", 65536),
+        ("/move", 20000),
+        ("/end", 0),
+    ] {
+        let body = game_state("g1", "me", 3).replace(
+            r#""height": 11, "width": 11"#,
+            &format!(r#""height": {side}, "width": {side}"#),
+        );
+        let response = client
+            .post(format!("http://{addr}{path}"))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400, "{path} with side {side}");
+    }
+    let (answer, _) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
+    assert!(answer.starts_with(r#"{"move":""#), "{answer}");
+}
+
+#[tokio::test]
+async fn presses_made_in_auto_are_not_replayed() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut pad = connect_pad(&addr).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    for mode in ["manual", "auto"] {
+        pad.send(Message::binary(vec![4u8])).await.unwrap();
+        next_text_containing(&mut pad, &format!(r#""mode":"{mode}""#)).await;
+    }
+    pad.send(Message::binary(vec![2u8])).await.unwrap();
+    pad.send(Message::binary(vec![4u8])).await.unwrap();
+    next_text_containing(&mut pad, r#""mode":"assist""#).await;
+
+    let (answer, took) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
+    assert_eq!(answer, r#"{"move":"up"}"#);
+    assert!(took >= HOLD - Duration::from_millis(10), "{took:?}");
+}
+
+#[tokio::test]
+async fn changing_mode_drops_queued_presses() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut pad = connect_pad(&addr).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    pad.send(Message::binary(vec![2u8])).await.unwrap();
+    pad.send(Message::binary(vec![4u8])).await.unwrap();
+    next_text_containing(&mut pad, r#""mode":"manual""#).await;
+
+    let (answer, took) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
+    assert_eq!(answer, r#"{"move":"up"}"#);
+    assert!(took >= HOLD - Duration::from_millis(10), "{took:?}");
+}
+
+#[tokio::test]
+async fn a_game_attached_by_its_first_move_starts_without_old_presses() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut pad = connect_pad(&addr).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    pad.send(Message::binary(vec![2u8])).await.unwrap();
+    echo(&mut pad, vec![5, 1]).await;
+    post(&addr, "/end", &game_state("g1", "me", 3)).await;
+    // Between games a press has nothing to steer.
+    pad.send(Message::binary(vec![3u8])).await.unwrap();
+    echo(&mut pad, vec![5, 2]).await;
+
+    let (answer, took) = post(&addr, "/move", &game_state("g2", "me", 3)).await;
+    assert_eq!(answer, r#"{"move":"up"}"#);
+    assert!(took >= HOLD - Duration::from_millis(10), "{took:?}");
+}
+
+#[tokio::test]
+async fn our_second_snake_in_the_same_game_does_not_wait() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let _pad = connect_pad(&addr).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    let (_, took) = post(&addr, "/move", &game_state("g1", "twin", 3)).await;
+    assert!(took < Duration::from_millis(50), "{took:?}");
+}
+
+#[tokio::test]
+async fn a_newer_turn_releases_the_older_request_without_taking_the_press() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut pad = connect_pad(&addr).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    let older = tokio::spawn({
+        let addr = addr.clone();
+        async move { post(&addr, "/move", &game_state("g1", "me", 3)).await }
+    });
+    next_text_containing(&mut pad, r#""t":"turn""#).await;
+    let newer = tokio::spawn({
+        let addr = addr.clone();
+        async move { post(&addr, "/move", &game_state("g1", "me", 4)).await }
+    });
+    let (answer, took) = older.await.unwrap();
+    assert_eq!(answer, r#"{"move":"up"}"#);
+    assert!(took < HOLD - Duration::from_millis(100), "{took:?}");
+
+    next_text_containing(&mut pad, r#""turn": 4,"#).await;
+    pad.send(Message::binary(vec![2u8])).await.unwrap();
+    let (answer, took) = newer.await.unwrap();
+    assert_eq!(answer, r#"{"move":"left"}"#);
+    assert!(took < HOLD - Duration::from_millis(100), "{took:?}");
+}
+
+#[tokio::test]
+async fn a_silent_pad_is_closed_and_moves_stop_waiting() {
+    let addr = spawn_server(Duration::from_millis(300)).await;
+    let mut pad = connect_pad(&addr).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    // Say nothing; the server should hang up shortly after 300 ms.
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match pad.next().await {
+                Some(Ok(Message::Text(_))) => continue,
+                _ => return,
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the silent pad was not closed");
+    let (_, took) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
+    assert!(took < Duration::from_millis(50), "{took:?}");
+}
+
+#[tokio::test]
+async fn oversized_pad_frames_close_the_socket() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut pad = connect_pad(&addr).await;
+    let mut frame = vec![0u8; 2048];
+    frame[0] = 5;
+    pad.send(Message::binary(frame)).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match pad.next().await {
+                Some(Ok(Message::Text(_))) => continue,
+                other => return other,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !matches!(reply, Some(Ok(Message::Binary(_)))),
+        "a 2 KiB frame was echoed"
+    );
+}
+
+async fn spawn_server(pad_idle: Duration) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let app = router(Config {
         token: TOKEN.to_owned(),
         colour: "#DD69b4".to_owned(),
+        pad_idle,
     });
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     addr
@@ -153,15 +308,15 @@ async fn connect_pad(addr: &str) -> Pad {
     pad
 }
 
-/// Heading up from (5,5) on an empty 11x11 board, with a 500 ms timeout.
-fn game_state(game: &str) -> String {
+/// `snake` heading up from (5,5) on an empty 11x11 board, with a 500 ms timeout.
+fn game_state(game: &str, snake: &str, turn: u32) -> String {
     let body = r#"[{"x":5,"y":5},{"x":5,"y":4},{"x":5,"y":3}]"#;
     format!(
         r#"{{"game": {{"id": "{game}", "ruleset": {{"name": "standard", "version": "v1"}}, "timeout": 500}},
-        "turn": 3,
+        "turn": {turn},
         "board": {{"height": 11, "width": 11, "food": [], "hazards": [],
             "snakes": [{{"id": "me", "name": "me", "health": 97, "body": {body}, "head": {{"x":5,"y":5}}, "latency": "", "length": 3}}]}},
-        "you": {{"id": "me", "name": "me", "health": 97, "body": {body}, "head": {{"x":5,"y":5}}, "latency": "", "length": 3}}}}"#
+        "you": {{"id": "{snake}", "name": "{snake}", "health": 97, "body": {body}, "head": {{"x":5,"y":5}}, "latency": "", "length": 3}}}}"#
     )
 }
 

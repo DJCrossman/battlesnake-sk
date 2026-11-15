@@ -27,11 +27,20 @@ pub enum Source {
 #[derive(Default)]
 pub struct Control {
     pub queue: InputQueue,
-    /// The game the pad steers: the latest `/start`, or the first game seen on `/move`.
-    pub attached: Option<String>,
+    /// The snake the pad steers: ours in the latest `/start`, or in the first game seen on `/move`.
+    attached: Option<Attachment>,
     pub overhead: Overhead,
-    /// How long we took to answer the attached game's previous `/move`.
+    /// How long we took to answer the attached snake's previous `/move`.
     pub last_spent_ms: Option<f64>,
+    /// Counts the attached snake's `/move` requests. A request still waiting when a newer one
+    /// arrives has been given up on by the engine, so it stops without taking a press.
+    pub latest_move: u64,
+}
+
+/// One snake in one game: the same game can hold two of our snakes.
+struct Attachment {
+    game: String,
+    snake: String,
 }
 
 /// Presses waiting for a turn. Two are kept so a quick double turn works; more are dropped.
@@ -95,6 +104,39 @@ impl Source {
     }
 }
 
+impl Control {
+    /// Hands the pad to `state`'s snake. Presses and timings from before belong to another game.
+    pub fn attach(&mut self, state: &GameState) {
+        self.attached = Some(Attachment {
+            game: state.game.id.to_string(),
+            snake: state.you.id.to_string(),
+        });
+        self.queue.clear();
+        self.last_spent_ms = None;
+    }
+
+    /// Releases the pad if `state`'s snake holds it; returns whether it did.
+    pub fn detach(&mut self, state: &GameState) -> bool {
+        if !self.is_attached(state) {
+            return false;
+        }
+        self.attached = None;
+        self.queue.clear();
+        true
+    }
+
+    pub fn is_attached(&self, state: &GameState) -> bool {
+        self.attached
+            .as_ref()
+            .is_some_and(|a| a.game == state.game.id && a.snake == state.you.id)
+    }
+
+    /// Whether any snake is attached, i.e. whether a press can be played at all.
+    pub fn has_attachment(&self) -> bool {
+        self.attached.is_some()
+    }
+}
+
 impl InputQueue {
     /// Queues a press; returns false when the queue is full and the press was dropped.
     pub fn push(&mut self, dir: Direction) -> bool {
@@ -107,14 +149,6 @@ impl InputQueue {
 
     pub fn clear(&mut self) {
         self.inputs.clear();
-    }
-
-    pub fn len(&self) -> usize {
-        self.inputs.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inputs.is_empty()
     }
 
     /// The oldest press that may be played this turn. Presses that may not are discarded.
@@ -146,14 +180,6 @@ pub fn move_at_deadline(state: &GameState, mode: Mode) -> Option<Direction> {
 }
 
 impl Overhead {
-    pub fn new() -> Self {
-        Overhead { ms: 100.0 }
-    }
-
-    pub fn ms(self) -> f64 {
-        self.ms
-    }
-
     /// Learns from one turn: the engine measured `latency_ms` for our previous answer, of which
     /// we spent `spent_ms` ourselves. A higher sample is taken at once, a lower one slowly, and a
     /// timeout (latency at or past the game's timeout) adds 100 ms on top.
@@ -177,9 +203,10 @@ impl Overhead {
     }
 }
 
+/// Until the engine reports a latency, assume 100 ms.
 impl Default for Overhead {
     fn default() -> Self {
-        Self::new()
+        Overhead { ms: 100.0 }
     }
 }
 
@@ -207,9 +234,40 @@ mod tests {
         assert!(queue.push(Direction::Up));
         assert!(queue.push(Direction::Left));
         assert!(!queue.push(Direction::Right));
-        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.inputs.len(), 2);
         queue.clear();
-        assert!(queue.is_empty());
+        assert!(queue.inputs.is_empty());
+    }
+
+    #[test]
+    fn attaching_starts_from_a_clean_slate() {
+        let state = bottom_row();
+        let mut control = Control::default();
+        control.queue.push(Direction::Up);
+        control.last_spent_ms = Some(340.0);
+        control.attach(&state);
+        assert!(control.is_attached(&state));
+        assert!(control.queue.inputs.is_empty());
+        assert_eq!(control.last_spent_ms, None);
+    }
+
+    #[test]
+    fn attachment_is_one_snake_in_one_game() {
+        let state = bottom_row();
+        let mut control = Control::default();
+        control.attach(&state);
+        let other_snake = BOTTOM_ROW.replace(r#""you": {"id": "me""#, r#""you": {"id": "other""#);
+        let other_snake: GameState = serde_json::from_str(&other_snake).unwrap();
+        let other_game = BOTTOM_ROW.replace(r#""id": "g""#, r#""id": "g2""#);
+        let other_game: GameState = serde_json::from_str(&other_game).unwrap();
+        assert!(!control.is_attached(&other_snake));
+        assert!(!control.is_attached(&other_game));
+        assert!(!control.detach(&other_snake));
+
+        control.queue.push(Direction::Right);
+        assert!(control.detach(&state));
+        assert!(!control.has_attachment());
+        assert!(control.queue.inputs.is_empty());
     }
 
     #[test]
@@ -231,11 +289,11 @@ mod tests {
             queue.take_usable(&state, Mode::Assist),
             Some(Direction::Right)
         );
-        assert!(queue.is_empty());
+        assert!(queue.inputs.is_empty());
 
         queue.push(Direction::Down);
         assert_eq!(queue.take_usable(&state, Mode::Assist), None);
-        assert!(queue.is_empty());
+        assert!(queue.inputs.is_empty());
     }
 
     #[test]
@@ -298,30 +356,30 @@ mod tests {
 
     #[test]
     fn overhead_starts_at_100_ms() {
-        let overhead = Overhead::new();
-        assert_eq!(overhead.ms(), 100.0);
+        let overhead = Overhead::default();
+        assert_eq!(overhead.ms, 100.0);
         assert_eq!(overhead.hold(500), Duration::from_millis(350));
     }
 
     #[test]
     fn overhead_rises_at_once_and_decays_slowly() {
-        let mut overhead = Overhead::new();
+        let mut overhead = Overhead::default();
         overhead.observe(400.0, 250.0, 500.0);
-        assert_eq!(overhead.ms(), 150.0);
+        assert_eq!(overhead.ms, 150.0);
         overhead.observe(300.0, 250.0, 500.0);
-        assert!((overhead.ms() - 140.0).abs() < 1e-9);
+        assert!((overhead.ms - 140.0).abs() < 1e-9);
     }
 
     #[test]
     fn overhead_grows_by_100_ms_after_a_timeout() {
-        let mut overhead = Overhead::new();
+        let mut overhead = Overhead::default();
         overhead.observe(500.0, 300.0, 500.0);
-        assert_eq!(overhead.ms(), 200.0);
+        assert_eq!(overhead.ms, 200.0);
     }
 
     #[test]
     fn hold_never_goes_negative() {
-        let mut overhead = Overhead::new();
+        let mut overhead = Overhead::default();
         for _ in 0..10 {
             overhead.observe(500.0, 0.0, 500.0);
         }

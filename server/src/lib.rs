@@ -27,16 +27,21 @@ pub struct Config {
     /// The pad's first WebSocket message must equal this.
     pub token: String,
     pub colour: String,
+    /// A pad socket that receives nothing for this long is closed. The page sends an echo
+    /// request every 2 s, so silence means the phone went away without closing the connection.
+    pub pad_idle: Duration,
 }
 
 struct App {
     token: String,
     personalisation: String,
+    pad_idle: Duration,
     control: Mutex<Control>,
     mode: AtomicU8,
     /// Authenticated pad sockets.
     pads: AtomicUsize,
-    /// Wakes a `/move` waiting for the player: a press, a mode change or a pad leaving.
+    /// Wakes a `/move` waiting for the player: a press, a mode change, a pad leaving or a newer
+    /// `/move` for the same snake.
     wake: Notify,
     /// JSON frames for every pad. Slow sockets lag and drop frames rather than hold anyone up.
     events: broadcast::Sender<Utf8Bytes>,
@@ -53,6 +58,7 @@ pub fn router(config: Config) -> Router {
             "tail": "freckled",
         })
         .to_string(),
+        pad_idle: config.pad_idle,
         control: Mutex::new(Control::default()),
         mode: AtomicU8::new(Mode::Assist.into()),
         pads: AtomicUsize::new(0),
@@ -84,18 +90,16 @@ async fn start_game(State(app): State<Arc<App>>, body: Bytes) -> StatusCode {
     let Ok(state) = serde_json::from_slice::<GameState>(&body) else {
         return StatusCode::BAD_REQUEST;
     };
-    {
-        let mut control = app.control.lock().unwrap();
-        control.attached = Some(state.game.id.to_string());
-        control.queue.clear();
-        control.last_spent_ms = None;
-    }
-    info!(game = %state.game.id, timeout_ms = state.game.timeout, "game started");
+    app.control.lock().unwrap().attach(&state);
+    info!(game = %state.game.id, snake = %state.you.id, timeout_ms = state.game.timeout, "game started");
     if app.is_watched() {
-        app.broadcast(format!(
-            r#"{{"t":"start","state":{}}}"#,
-            String::from_utf8_lossy(&body)
-        ));
+        let _ = app.events.send(
+            format!(
+                r#"{{"t":"start","state":{}}}"#,
+                String::from_utf8_lossy(&body)
+            )
+            .into(),
+        );
     }
     StatusCode::OK
 }
@@ -105,27 +109,34 @@ async fn play_move(State(app): State<Arc<App>>, body: Bytes) -> Response {
     let Ok(state) = serde_json::from_slice::<GameState>(&body) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let hold = {
+    let attached = {
         let mut control = app.control.lock().unwrap();
-        if control.attached.is_none() {
-            info!(game = %state.game.id, "game attached");
+        if !control.has_attachment() {
+            control.attach(&state);
+            info!(game = %state.game.id, snake = %state.you.id, "game attached");
         }
-        let attached = control
-            .attached
-            .get_or_insert_with(|| state.game.id.to_string());
-        if *attached == state.game.id {
+        if control.is_attached(&state) {
             let latency = state.you.latency.trim().parse::<f64>().unwrap_or(0.0);
             if let (true, Some(spent)) = (latency > 0.0, control.last_spent_ms) {
-                let timeout = f64::from(state.game.timeout);
-                control.overhead.observe(latency, spent, timeout);
+                control
+                    .overhead
+                    .observe(latency, spent, f64::from(state.game.timeout));
             }
-            Some(control.overhead.hold(state.game.timeout))
+            control.latest_move += 1;
+            Some((
+                control.overhead.hold(state.game.timeout),
+                control.latest_move,
+            ))
         } else {
             None
         }
     };
-    let dir = match hold {
-        Some(hold) => steer_attached_game(&app, &state, &body, received, hold).await,
+    let dir = match attached {
+        Some((hold, this_move)) => {
+            // A request for an earlier turn may still be waiting; it must stop now.
+            app.wake.notify_waiters();
+            steer_attached_snake(&app, &state, &body, received, hold, this_move).await
+        }
         None => autopilot::choose_move(&state),
     };
     (
@@ -139,20 +150,16 @@ async fn end_game(State(app): State<Arc<App>>, body: Bytes) -> StatusCode {
     let Ok(state) = serde_json::from_slice::<GameState>(&body) else {
         return StatusCode::BAD_REQUEST;
     };
-    let was_attached = {
-        let mut control = app.control.lock().unwrap();
-        let was_attached = control.attached.as_deref() == Some(&state.game.id);
-        if was_attached {
-            control.attached = None;
-        }
-        was_attached
-    };
-    info!(game = %state.game.id, attached = was_attached, turn = state.turn, "game ended");
+    let was_attached = app.control.lock().unwrap().detach(&state);
+    info!(game = %state.game.id, snake = %state.you.id, attached = was_attached, turn = state.turn, "game ended");
     if was_attached && app.is_watched() {
-        app.broadcast(format!(
-            r#"{{"t":"end","state":{}}}"#,
-            String::from_utf8_lossy(&body)
-        ));
+        let _ = app.events.send(
+            format!(
+                r#"{{"t":"end","state":{}}}"#,
+                String::from_utf8_lossy(&body)
+            )
+            .into(),
+        );
     }
     StatusCode::OK
 }
@@ -166,20 +173,16 @@ impl App {
     fn is_watched(&self) -> bool {
         self.pads.load(Ordering::Acquire) > 0
     }
-
-    fn broadcast(&self, frame: String) {
-        // An error only means every receiver has gone since `is_watched`.
-        let _ = self.events.send(frame.into());
-    }
 }
 
-/// The attached game's move: the player's if one arrives in time, otherwise the fallback rules.
-async fn steer_attached_game(
+/// The attached snake's move: the player's if one arrives in time, otherwise the fallback rules.
+async fn steer_attached_snake(
     app: &App,
     state: &GameState<'_>,
     raw: &[u8],
     received: Instant,
     hold: Duration,
+    this_move: u64,
 ) -> Direction {
     let mode = app.mode();
     let watched = app.is_watched();
@@ -189,35 +192,47 @@ async fn steer_attached_game(
         } else {
             hold.as_millis()
         };
-        app.broadcast(format!(
-            r#"{{"t":"turn","mode":"{}","hold_ms":{hold_ms},"state":{}}}"#,
-            mode.as_str(),
-            String::from_utf8_lossy(raw)
-        ));
+        let _ = app.events.send(
+            format!(
+                r#"{{"t":"turn","mode":"{}","hold_ms":{hold_ms},"state":{}}}"#,
+                mode.as_str(),
+                String::from_utf8_lossy(raw)
+            )
+            .into(),
+        );
     }
     let (dir, source) = if !watched || mode == Mode::Auto {
         (autopilot::choose_move(state), Source::Auto)
     } else {
-        wait_for_player(app, state, received + hold).await
+        wait_for_player(app, state, received + hold, this_move).await
     };
     if app.is_watched() {
-        app.broadcast(format!(
-            r#"{{"t":"moved","turn":{},"move":"{}","source":"{}"}}"#,
-            state.turn,
-            dir.as_str(),
-            source.as_str()
-        ));
+        let _ = app.events.send(
+            format!(
+                r#"{{"t":"moved","turn":{},"move":"{}","source":"{}"}}"#,
+                state.turn,
+                dir.as_str(),
+                source.as_str()
+            )
+            .into(),
+        );
     }
-    app.control.lock().unwrap().last_spent_ms = Some(received.elapsed().as_secs_f64() * 1000.0);
+    let mut control = app.control.lock().unwrap();
+    if control.is_attached(state) {
+        control.last_spent_ms = Some(received.elapsed().as_secs_f64() * 1000.0);
+    }
     dir
 }
 
 /// Answers the moment a usable press is queued (one already waiting included), and otherwise at
-/// `deadline`. A switch to auto or the last pad leaving hands the move to the autopilot at once.
+/// `deadline`. A switch to auto or the last pad leaving hands the move to the autopilot at once;
+/// a newer `/move` for the same snake ends the wait at once with the deadline's answer, leaving
+/// the presses for the newer turn.
 async fn wait_for_player(
     app: &App,
     state: &GameState<'_>,
     deadline: Instant,
+    this_move: u64,
 ) -> (Direction, Source) {
     loop {
         let woken = app.wake.notified();
@@ -228,13 +243,21 @@ async fn wait_for_player(
         if mode == Mode::Auto || !app.is_watched() {
             return (autopilot::choose_move(state), Source::Auto);
         }
-        let input = app.control.lock().unwrap().queue.take_usable(state, mode);
+        let (superseded, input) = {
+            let mut control = app.control.lock().unwrap();
+            if control.latest_move != this_move {
+                (true, None)
+            } else {
+                (false, control.queue.take_usable(state, mode))
+            }
+        };
         if let Some(dir) = input {
             return (dir, Source::Pad);
         }
-        if tokio::time::timeout_at(deadline.into(), woken)
-            .await
-            .is_err()
+        if superseded
+            || tokio::time::timeout_at(deadline.into(), woken)
+                .await
+                .is_err()
         {
             return match control::move_at_deadline(state, app.mode()) {
                 Some(dir) => (dir, Source::Straight),

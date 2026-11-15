@@ -1,4 +1,5 @@
 use std::env;
+use std::time::Duration;
 
 use axum::serve::ListenerExt;
 use battlesnake_sk::{Config, router};
@@ -27,6 +28,8 @@ async fn main() -> std::io::Result<()> {
     let config = Config {
         token,
         colour: env::var("SNAKE_COLOUR").unwrap_or_else(|_| "#DD69b4".to_owned()),
+        // The page sends an echo request every 2 s; three missed in a row means it is gone.
+        pad_idle: Duration::from_secs(6),
     };
     let port: u16 = env::var("PORT")
         .ok()
