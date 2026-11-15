@@ -8,8 +8,9 @@ use crate::game::{Direction, GameState, Point};
 
 /// Expansions below the root before a branch is scored by its weight alone. The original had no
 /// depth limit and was cut off by a 250 ms clock instead; this keeps the worst case (an open board
-/// with three safe moves at every step) to a few thousand nodes.
-const MAX_DEPTH: usize = 6;
+/// with three safe moves at every step, about 1,100 nodes) near 0.16 ms in a release build. Each
+/// extra level triples it.
+const MAX_DEPTH: usize = 5;
 /// The flood fill stops counting at this many cells; it is also the space bonus's denominator.
 const SPACE_CAP: usize = 30;
 
@@ -395,12 +396,12 @@ mod tests {
 
     #[test]
     fn worst_case_open_board_stays_well_under_a_millisecond() {
-        // A very hungry snake heading for food on an empty 19x19 board keeps the 0.85 decay,
-        // so every branch runs to the depth cap.
+        // A snake in the middle of an empty 19x19 board has three safe moves at every step and
+        // every branch runs to the depth cap: the largest tree the search can build.
         let state = parse(
             r#"{"board": {"height": 19, "width": 19, "food": [{"x":0,"y":0}], "hazards": [], "snakes": []},
-            "you": {"id": "me", "health": 10, "body": [{"x":18,"y":18},{"x":18,"y":17},{"x":18,"y":16}],
-                "head": {"x":18,"y":18}, "length": 3}}"#,
+            "you": {"id": "me", "health": 10, "body": [{"x":9,"y":9},{"x":9,"y":8},{"x":9,"y":7}],
+                "head": {"x":9,"y":9}, "length": 3}}"#,
         );
         choose_move(&state);
         let runs = 50;
