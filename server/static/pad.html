@@ -61,6 +61,17 @@
   .stat span { display: block; font-size: 17px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .stat small { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #help { color: var(--muted); font-size: 12px; text-align: center; }
+  #flipper { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #flipper[hidden] { display: none; }
+  #flipper button {
+    font: inherit; font-weight: 600; color: var(--text); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
+  }
+  #flipper-link { color: var(--muted); }
+  #flipper-link[data-link="connected"] { color: var(--ok); }
+  #flipper-link[data-link="connecting"] { color: var(--warn); }
+  #flipper-link[data-link="lost"] { color: var(--bad); }
+  #flipper-unsupported { color: var(--muted); font-size: 12px; text-align: center; }
   /* 16px stops iOS from zooming the page when the field takes focus. */
   #keys { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; font-size: 16px; }
 </style>
@@ -85,6 +96,11 @@
     <div class="stat"><b>Last key via</b><span id="via">—</span></div>
   </div>
   <div id="help">Arrows / WASD steer · Space / Enter switches mode</div>
+  <div id="flipper" hidden>
+    <button id="flipper-connect" type="button">Connect Flipper screen</button>
+    <span id="flipper-link" data-link="off">Flipper: off</span>
+  </div>
+  <div id="flipper-unsupported" hidden>The Flipper screen needs Chrome on Android over HTTPS.</div>
   <input id="keys" type="text" autocomplete="off" autocorrect="off" autocapitalize="off"
          spellcheck="false" inputmode="none" aria-hidden="true" tabindex="-1">
 <script>
@@ -105,7 +121,44 @@ const STEPS = { up: [0, 1], down: [0, -1], left: [-1, 0], right: [1, 0] };
 // An echo request goes out every 2 s; no reply for this long means the socket is dead.
 const ECHO_DEADLINE_MS = 5000;
 
+// The Flipper's BLE serial service (firmware targets/f7/ble_glue/services/serial_service*.{c,inc};
+// the firmware stores the 128-bit UUIDs little-endian, these are the usual string forms).
+const FLIPPER_NAME_PREFIX = "Board ";
+const FLIPPER_SERVICE = "8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000";
+// The phone writes here (write, write without response; up to 486 bytes per value).
+const FLIPPER_RX = "19ed82ae-ed21-4c9d-4145-228e62fe0000";
+// The Flipper indicates its bytes here.
+const FLIPPER_TX = "19ed82ae-ed21-4c9d-4145-228e61fe0000";
+// Big-endian uint32: how many more bytes the Flipper will accept. Each write spends it; the
+// Flipper notifies the full buffer size again only once it is spent to exactly 0 and drained.
+const FLIPPER_FLOW = "19ed82ae-ed21-4c9d-4145-228e63fe0000";
+// One write per chunk. 243 is the firmware's own characteristic chunk and fits the MTU it
+// negotiates; 20 fits the 23-byte default MTU when a larger write is refused.
+const FLIPPER_CHUNK = 243;
+const FLIPPER_SMALL_CHUNK = 20;
+// Cell codes on the Flipper, and which wins when several things share a cell.
+const CELL = { empty: 0, food: 1, hazard: 2, myBody: 3, myHead: 4, otherBody: 5, otherHead: 6 };
+const CELL_RANK = [0, 2, 1, 4, 6, 3, 5];
+const MODE_BITS = { assist: 0, manual: 1, auto: 2 };
+
 let socket = null;
+let serverOnline = false;
+let currentMode = "assist";
+// What the Flipper should show; resent when the link, the mode or the server connection changes.
+let flipperScreen = { state: null };
+const flipper = {
+  device: null,
+  rx: null,
+  link: "off",
+  backoff: 1000,
+  retry: null,
+  chunk: FLIPPER_CHUNK,
+  // Bytes the Flipper will still accept (Infinity if it does not publish flow control).
+  credit: Infinity,
+  creditArrived: null,
+  writing: false,
+  newestFrame: null,
+};
 let backoff = 500;
 let unansweredEchoSince = null;
 let rttMs = null;
@@ -146,6 +199,8 @@ function connect() {
 
 function reconnectLater() {
   socket = null;
+  serverOnline = false;
+  showOnFlipper({ ...flipperScreen, started: false });
   setConn("", "offline — retrying in " + (backoff / 1000).toFixed(1) + " s");
   setTimeout(connect, backoff);
   backoff = Math.min(backoff * 2, 8000);
@@ -176,8 +231,10 @@ function onFrame(frame) {
   switch (frame.t) {
     case "hello":
       backoff = 500;
+      serverOnline = true;
       setConn("open", "connected");
       setMode(frame.mode);
+      showOnFlipper({ ...flipperScreen, started: false });
       break;
     case "mode":
       setMode(frame.mode);
@@ -185,6 +242,7 @@ function onFrame(frame) {
     case "start":
       document.getElementById("overlay").textContent = "";
       draw(frame.state);
+      showOnFlipper({ state: frame.state, started: true });
       break;
     case "turn":
       document.getElementById("overlay").textContent = "";
@@ -195,19 +253,25 @@ function onFrame(frame) {
       holdMs = frame.hold_ms;
       holding = holdMs > 0;
       if (holding) requestAnimationFrame(animateHold); else holdBar.style.width = "0";
+      showOnFlipper({ state: frame.state, holdMs: Math.max(0, holdMs - (rttMs ?? 0) / 2) });
       break;
     case "moved":
       holding = false;
       holdBar.style.width = "0";
       document.getElementById("move").textContent = frame.move;
       document.getElementById("source").textContent = frame.source;
-      if (lastState && lastState.turn === frame.turn) draw(advanceOurSnake(lastState, frame.move));
+      if (lastState && lastState.turn === frame.turn) {
+        const next = advanceOurSnake(lastState, frame.move);
+        draw(next);
+        showOnFlipper({ state: next });
+      }
       break;
     case "end":
       holding = false;
       holdBar.style.width = "0";
       draw(frame.state);
       document.getElementById("overlay").textContent = "Game over";
+      showOnFlipper({ state: frame.state, over: true });
       break;
   }
 }
@@ -222,6 +286,10 @@ function setMode(mode) {
   const el = document.getElementById("mode");
   el.dataset.mode = mode;
   el.textContent = mode;
+  if (mode !== currentMode) {
+    currentMode = mode;
+    showOnFlipper({ ...flipperScreen, started: false });
+  }
 }
 
 // Our snake as it is after the server's answer, so presses before the next turn frame aim from
@@ -276,8 +344,11 @@ keyField.addEventListener("input", () => {
 
 // iOS only lets a page focus a field during a user gesture, so after a reload or a return to
 // the tab the text path is dead until a tap. Say so instead of failing silently.
+// While the Flipper is linked over its serial service the keyboard path is not in use.
 function showArmHint() {
-  document.getElementById("arm").classList.toggle("shown", document.activeElement !== keyField);
+  document
+    .getElementById("arm")
+    .classList.toggle("shown", flipper.link !== "connected" && document.activeElement !== keyField);
 }
 keyField.addEventListener("focus", showArmHint);
 keyField.addEventListener("blur", showArmHint);
@@ -352,6 +423,209 @@ function animateHold() {
   if (left > 0) requestAnimationFrame(animateHold);
 }
 
+// ---- Flipper screen: Web Bluetooth bridge to the Flipper's serial service ------------------
+//
+// Flipper → page: single bytes 0..=4, forwarded to the server like key presses.
+// Page → Flipper: frames of 0x53, a little-endian payload length, then the payload (flags,
+// width, height, turn lo/hi, health, length, hold in 10 ms units, then one nibble per cell from
+// the top row down), mirroring every board the canvas draws.
+
+// Web Bluetooth only exists in secure contexts (HTTPS or localhost) in Chromium browsers.
+function showFlipperControls() {
+  const supported = "bluetooth" in navigator;
+  document.getElementById("flipper").hidden = !supported;
+  document.getElementById("flipper-unsupported").hidden = supported;
+}
+
+document.getElementById("flipper-connect").addEventListener("click", async () => {
+  let device;
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: FLIPPER_NAME_PREFIX }],
+      optionalServices: [FLIPPER_SERVICE],
+    });
+  } catch (_) {
+    return; // The chooser was dismissed.
+  }
+  if (flipper.device && flipper.device !== device && flipper.device.gatt.connected) {
+    flipper.device.gatt.disconnect();
+  }
+  flipper.device = device;
+  flipper.backoff = 1000;
+  device.ongattserverdisconnected = (event) => {
+    if (event.target !== flipper.device) return;
+    flipper.rx = null;
+    setFlipperLink("lost");
+    if (flipper.creditArrived) flipper.creditArrived();
+    retryFlipperLater();
+  };
+  linkFlipper();
+});
+
+async function linkFlipper() {
+  const device = flipper.device;
+  setFlipperLink("connecting");
+  try {
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(FLIPPER_SERVICE);
+    const [rx, tx, flow] = await Promise.all(
+      [FLIPPER_RX, FLIPPER_TX, FLIPPER_FLOW].map((uuid) => service.getCharacteristic(uuid)),
+    );
+    flipper.credit = Infinity;
+    try {
+      flow.oncharacteristicvaluechanged = (event) => {
+        flipper.credit = event.target.value.getUint32(0);
+        if (flipper.creditArrived) flipper.creditArrived();
+      };
+      await flow.startNotifications();
+      flipper.credit = (await flow.readValue()).getUint32(0);
+    } catch (_) {
+      flipper.credit = Infinity; // No flow control published: write freely.
+    }
+    tx.oncharacteristicvaluechanged = (event) => {
+      const value = event.target.value;
+      for (const byte of new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) {
+        if (byte <= 4) send(byte, "flipper");
+      }
+    };
+    await tx.startNotifications();
+    if (device !== flipper.device) return;
+    flipper.rx = rx;
+    flipper.chunk = FLIPPER_CHUNK;
+    flipper.backoff = 1000;
+    setFlipperLink("connected");
+    showOnFlipper({ ...flipperScreen, started: false });
+  } catch (_) {
+    if (device !== flipper.device) return;
+    setFlipperLink("lost");
+    retryFlipperLater();
+  }
+}
+
+function retryFlipperLater() {
+  if (flipper.retry) return;
+  flipper.retry = setTimeout(() => {
+    flipper.retry = null;
+    linkFlipper();
+  }, flipper.backoff);
+  flipper.backoff = Math.min(flipper.backoff * 2, 16000);
+}
+
+function setFlipperLink(link) {
+  flipper.link = link;
+  const el = document.getElementById("flipper-link");
+  el.dataset.link = link;
+  el.textContent = "Flipper: " + link;
+  showArmHint();
+}
+
+// Records what the Flipper should show and sends it. Only the newest frame waits to be sent:
+// a frame produced while another is being written replaces any frame still waiting.
+function showOnFlipper(screen) {
+  flipperScreen = screen;
+  if (flipper.link !== "connected") return;
+  flipper.newestFrame = encodeFlipperFrame(screen, currentMode, !serverOnline);
+  if (!flipper.writing) writeNewestFrames();
+}
+
+async function writeNewestFrames() {
+  flipper.writing = true;
+  try {
+    while (flipper.newestFrame && flipper.rx) {
+      const frame = flipper.newestFrame;
+      flipper.newestFrame = null;
+      await writeFrame(frame);
+    }
+  } catch (_) {
+    // The link dropped mid-frame; reconnecting resends the current screen.
+  }
+  flipper.writing = false;
+}
+
+// One write in flight at a time, each within the chunk size and the Flipper's remaining buffer.
+async function writeFrame(frame) {
+  let offset = 0;
+  while (offset < frame.length) {
+    if (flipper.credit === 0) {
+      await new Promise((resolve) => {
+        flipper.creditArrived = () => {
+          flipper.creditArrived = null;
+          resolve();
+        };
+      });
+    }
+    const rx = flipper.rx;
+    if (!rx) throw new Error("Flipper link lost");
+    const size = Math.min(flipper.chunk, flipper.credit, frame.length - offset);
+    const chunk = frame.subarray(offset, offset + size);
+    try {
+      if (rx.properties.writeWithoutResponse) {
+        await rx.writeValueWithoutResponse(chunk);
+      } else {
+        await rx.writeValueWithResponse(chunk);
+      }
+    } catch (error) {
+      if (size > FLIPPER_SMALL_CHUNK) {
+        flipper.chunk = FLIPPER_SMALL_CHUNK;
+        continue;
+      }
+      throw error;
+    }
+    flipper.credit -= size;
+    offset += size;
+  }
+}
+
+// `screen`: { state (null = no game), started, over, holdMs }.
+function encodeFlipperFrame(screen, mode, offline) {
+  const state = screen.state;
+  const board = state && state.board;
+  const fits = board && board.width <= 25 && board.height <= 25;
+  const width = fits ? board.width : 0;
+  const height = fits ? board.height : 0;
+  const cells = new Uint8Array(width * height);
+  const place = (p, code) => {
+    if (p.x < 0 || p.y < 0 || p.x >= width || p.y >= height) return;
+    const i = (height - 1 - p.y) * width + p.x;
+    if (CELL_RANK[code] > CELL_RANK[cells[i]]) cells[i] = code;
+  };
+  if (fits) {
+    for (const h of board.hazards || []) place(h, CELL.hazard);
+    for (const f of board.food || []) place(f, CELL.food);
+    for (const snake of board.snakes || []) {
+      const mine = snake.id === state.you.id;
+      for (const p of snake.body) place(p, mine ? CELL.myBody : CELL.otherBody);
+      place(snake.head, mine ? CELL.myHead : CELL.otherHead);
+    }
+  }
+  const you = state ? state.you : null;
+  const turn = state ? state.turn & 0xffff : 0;
+  const payload = new Uint8Array(8 + Math.ceil(cells.length / 2));
+  payload[0] =
+    (screen.started ? 1 : 0) |
+    (screen.over ? 2 : 0) |
+    (state ? 0 : 4) |
+    (board && !fits ? 8 : 0) |
+    ((MODE_BITS[mode] ?? 0) << 4) |
+    (offline ? 64 : 0);
+  payload[1] = width;
+  payload[2] = height;
+  payload[3] = turn & 0xff;
+  payload[4] = turn >> 8;
+  payload[5] = you ? Math.min(255, Math.max(0, you.health)) : 0;
+  payload[6] = you ? Math.min(255, you.length ?? you.body.length) : 0;
+  payload[7] = Math.min(255, Math.floor((screen.holdMs || 0) / 10));
+  cells.forEach((code, i) => {
+    payload[8 + (i >> 1)] |= i % 2 === 0 ? code << 4 : code;
+  });
+  const frame = new Uint8Array(3 + payload.length);
+  frame[0] = 0x53;
+  frame[1] = payload.length & 0xff;
+  frame[2] = payload.length >> 8;
+  frame.set(payload, 3);
+  return frame;
+}
+
 // ---- screen wake lock ---------------------------------------------------------
 
 async function holdWakeLock() {
@@ -373,6 +647,7 @@ document.addEventListener("visibilitychange", () => {
 holdWakeLock();
 keyField.focus({ preventScroll: true });
 showArmHint();
+showFlipperControls();
 connect();
 </script>
 </body>
