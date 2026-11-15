@@ -64,13 +64,20 @@ pub fn router(config: Config) -> Router {
         .route("/start", post(start_game))
         .route("/move", post(play_move))
         .route("/end", post(end_game))
-        .route("/pad", get(|| async { Html(include_str!("../static/pad.html")) }))
+        .route(
+            "/pad",
+            get(|| async { Html(include_str!("../static/pad.html")) }),
+        )
         .route("/ws", get(pad::connect))
         .with_state(app)
 }
 
 async fn describe_snake(State(app): State<Arc<App>>) -> Response {
-    ([(CONTENT_TYPE, "application/json")], app.personalisation.clone()).into_response()
+    (
+        [(CONTENT_TYPE, "application/json")],
+        app.personalisation.clone(),
+    )
+        .into_response()
 }
 
 async fn start_game(State(app): State<Arc<App>>, body: Bytes) -> StatusCode {
@@ -103,7 +110,9 @@ async fn play_move(State(app): State<Arc<App>>, body: Bytes) -> Response {
         if control.attached.is_none() {
             info!(game = %state.game.id, "game attached");
         }
-        let attached = control.attached.get_or_insert_with(|| state.game.id.to_string());
+        let attached = control
+            .attached
+            .get_or_insert_with(|| state.game.id.to_string());
         if *attached == state.game.id {
             let latency = state.you.latency.trim().parse::<f64>().unwrap_or(0.0);
             if let (true, Some(spent)) = (latency > 0.0, control.last_spent_ms) {
@@ -223,7 +232,10 @@ async fn wait_for_player(
         if let Some(dir) = input {
             return (dir, Source::Pad);
         }
-        if tokio::time::timeout_at(deadline.into(), woken).await.is_err() {
+        if tokio::time::timeout_at(deadline.into(), woken)
+            .await
+            .is_err()
+        {
             return match control::move_at_deadline(state, app.mode()) {
                 Some(dir) => (dir, Source::Straight),
                 None => (autopilot::choose_move(state), Source::Auto),

@@ -1,1 +1,326 @@
 <!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Snake Pad</title>
+<style>
+  :root {
+    --bg: #0e1014;
+    --panel: #171a21;
+    --line: #262b36;
+    --text: #e6e8ee;
+    --muted: #8a91a3;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+    --food: #f43f5e;
+    --hazard: rgba(148, 163, 184, 0.28);
+    --grid: #1c2029;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+  body {
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; gap: 10px;
+    padding: max(12px, env(safe-area-inset-top)) 16px max(12px, env(safe-area-inset-bottom));
+    max-width: 640px; margin: 0 auto;
+    -webkit-user-select: none; user-select: none;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #conn { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  #conn::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+  #conn.open::before { background: var(--ok); }
+  #conn.connecting::before { background: var(--warn); }
+  #mode {
+    font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line);
+  }
+  #mode[data-mode="assist"] { color: var(--ok); }
+  #mode[data-mode="manual"] { color: var(--warn); }
+  #mode[data-mode="auto"] { color: #60a5fa; }
+  #board-wrap { position: relative; width: 100%; aspect-ratio: 1; }
+  canvas { width: 100%; height: 100%; display: block; border-radius: 10px; background: var(--panel); }
+  #overlay {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 18px; pointer-events: none; text-align: center; padding: 16px;
+  }
+  #hold { height: 8px; border-radius: 4px; background: var(--panel); overflow: hidden; }
+  #hold > div { height: 100%; width: 0; background: var(--ok); }
+  #stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+  }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+  .stat b { display: block; font-size: 11px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .05em; }
+  .stat span { display: block; font-size: 17px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #help { color: var(--muted); font-size: 12px; text-align: center; }
+  #keys { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }
+</style>
+</head>
+<body>
+  <header>
+    <div id="conn">offline</div>
+    <div id="mode" data-mode="">—</div>
+  </header>
+  <div id="board-wrap">
+    <canvas id="board" width="660" height="660"></canvas>
+    <div id="overlay">Waiting for a game…</div>
+  </div>
+  <div id="hold"><div></div></div>
+  <div id="stats">
+    <div class="stat"><b>Turn</b><span id="turn">—</span></div>
+    <div class="stat"><b>Health</b><span id="health">—</span></div>
+    <div class="stat"><b>Length</b><span id="length">—</span></div>
+    <div class="stat"><b>Last move</b><span id="move">—</span></div>
+    <div class="stat"><b>Round trip</b><span id="rtt">—</span></div>
+    <div class="stat"><b>Last key via</b><span id="via">—</span></div>
+  </div>
+  <div id="help">Arrows / WASD steer · Space / Enter switches mode</div>
+  <input id="keys" type="text" autocomplete="off" autocorrect="off" autocapitalize="off"
+         spellcheck="false" inputmode="none" aria-hidden="true" tabindex="-1">
+<script>
+"use strict";
+const token = decodeURIComponent(location.hash.slice(1));
+const $ = (id) => document.getElementById(id);
+const canvas = $("board");
+const ctx = canvas.getContext("2d");
+const holdBar = $("hold").firstElementChild;
+const keyField = $("keys");
+
+const KEY_BYTES = {
+  ArrowUp: 0, ArrowDown: 1, ArrowLeft: 2, ArrowRight: 3,
+  w: 0, s: 1, a: 2, d: 3, W: 0, S: 1, A: 2, D: 3,
+  " ": 4, Enter: 4,
+};
+const TEXT_BYTES = { w: 0, s: 1, a: 2, d: 3, " ": 4 };
+
+let socket = null;
+let backoff = 500;
+let holdStart = 0;
+let holdMs = 0;
+let holding = false;
+
+// ---- connection -------------------------------------------------------------
+
+function connect() {
+  if (!token) {
+    setConn("", "no token in URL (#token)");
+    return;
+  }
+  setConn("connecting", "connecting…");
+  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.binaryType = "arraybuffer";
+  socket = ws;
+  ws.onopen = () => ws.send(token);
+  ws.onmessage = (event) => {
+    if (typeof event.data === "string") {
+      onFrame(JSON.parse(event.data));
+    } else {
+      const view = new DataView(event.data);
+      if (view.byteLength >= 9 && view.getUint8(0) === 5) {
+        $("rtt").textContent = (performance.now() - view.getFloat64(1)).toFixed(0) + " ms";
+      }
+    }
+  };
+  ws.onclose = () => {
+    if (socket !== ws) return;
+    socket = null;
+    setConn("", "offline — retrying in " + (backoff / 1000).toFixed(1) + " s");
+    setTimeout(connect, backoff);
+    backoff = Math.min(backoff * 2, 8000);
+  };
+}
+
+function send(byte, via) {
+  $("via").textContent = via;
+  if (socket && socket.readyState === WebSocket.OPEN) socket.send(new Uint8Array([byte]));
+}
+
+setInterval(() => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  const frame = new DataView(new ArrayBuffer(9));
+  frame.setUint8(0, 5);
+  frame.setFloat64(1, performance.now());
+  socket.send(frame.buffer);
+}, 2000);
+
+function onFrame(frame) {
+  switch (frame.t) {
+    case "hello":
+      backoff = 500;
+      setConn("open", "connected");
+      setMode(frame.mode);
+      break;
+    case "mode":
+      setMode(frame.mode);
+      break;
+    case "start":
+      $("overlay").textContent = "";
+      draw(frame.state);
+      break;
+    case "turn":
+      $("overlay").textContent = "";
+      setMode(frame.mode);
+      draw(frame.state);
+      holdStart = performance.now();
+      holdMs = frame.hold_ms;
+      holding = holdMs > 0;
+      if (holding) requestAnimationFrame(animateHold); else holdBar.style.width = "0";
+      break;
+    case "moved":
+      holding = false;
+      holdBar.style.width = "0";
+      $("move").textContent = frame.move + " · " + frame.source;
+      break;
+    case "end":
+      holding = false;
+      holdBar.style.width = "0";
+      draw(frame.state);
+      $("overlay").textContent = "Game over";
+      break;
+  }
+}
+
+function setConn(cls, text) {
+  const el = $("conn");
+  el.className = cls;
+  el.textContent = text;
+}
+
+function setMode(mode) {
+  const el = $("mode");
+  el.dataset.mode = mode;
+  el.textContent = mode;
+}
+
+// ---- input ------------------------------------------------------------------
+
+// Primary path. preventDefault also stops the key from inserting text into the hidden field,
+// so a key handled here is never counted again by the text path.
+document.addEventListener("keydown", (event) => {
+  const byte = KEY_BYTES[event.key];
+  if (byte === undefined || event.ctrlKey || event.metaKey || event.altKey) return;
+  event.preventDefault();
+  if (event.repeat) return;
+  send(byte, "key");
+});
+
+// Fallback for iOS Safari when it stops delivering keydown from a Bluetooth keyboard that is
+// also a pointing device (WebKit bugs 301563 / 290779): typed text still reaches a focused field.
+keyField.addEventListener("beforeinput", (event) => {
+  // A non-cancelable insertion (e.g. during composition) lands in the field; `input` handles it.
+  if (!event.cancelable) return;
+  event.preventDefault();
+  for (const ch of event.data || "") {
+    const byte = TEXT_BYTES[ch.toLowerCase()];
+    if (byte !== undefined) send(byte, "text");
+  }
+});
+keyField.addEventListener("input", () => {
+  const text = keyField.value;
+  keyField.value = "";
+  for (const ch of text) {
+    const byte = TEXT_BYTES[ch.toLowerCase()];
+    if (byte !== undefined) send(byte, "text");
+  }
+});
+
+function focusKeyField() {
+  keyField.focus({ preventScroll: true });
+}
+document.addEventListener("pointerdown", focusKeyField);
+document.addEventListener("click", focusKeyField);
+
+// ---- board ------------------------------------------------------------------
+
+function draw(state) {
+  const board = state.board;
+  const size = Math.min(canvas.width / board.width, canvas.height / board.height);
+  const cx = (x) => x * size;
+  const cy = (y) => (board.height - 1 - y) * size;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--grid");
+  for (let x = 0; x < board.width; x++) {
+    for (let y = 0; y < board.height; y++) {
+      if ((x + y) % 2 === 0) ctx.fillRect(cx(x), cy(y), size, size);
+    }
+  }
+
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--hazard");
+  for (const h of board.hazards || []) ctx.fillRect(cx(h.x), cy(h.y), size, size);
+
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--food");
+  for (const f of board.food || []) {
+    ctx.beginPath();
+    ctx.arc(cx(f.x) + size / 2, cy(f.y) + size / 2, size * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  const youId = state.you && state.you.id;
+  const snakes = [...(board.snakes || [])].sort((a, b) => (a.id === youId) - (b.id === youId));
+  for (const snake of snakes) {
+    const mine = snake.id === youId;
+    const colour = (snake.customizations && snake.customizations.color) || "#94a3b8";
+    ctx.globalAlpha = mine ? 1 : 0.6;
+    ctx.fillStyle = colour;
+    const inset = mine ? size * 0.06 : size * 0.14;
+    snake.body.forEach((p, i) => {
+      if (i > 0 && p.x === snake.body[i - 1].x && p.y === snake.body[i - 1].y) return;
+      ctx.fillRect(cx(p.x) + inset, cy(p.y) + inset, size - inset * 2, size - inset * 2);
+    });
+    const head = snake.head;
+    if (mine) {
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = Math.max(2, size * 0.1);
+      ctx.strokeStyle = "#ffffff";
+      ctx.strokeRect(cx(head.x) + inset, cy(head.y) + inset, size - inset * 2, size - inset * 2);
+    }
+    ctx.fillStyle = "#0e1014";
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(cx(head.x) + size / 2, cy(head.y) + size / 2, size * 0.1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  $("turn").textContent = state.turn;
+  if (state.you) {
+    $("health").textContent = state.you.health;
+    $("length").textContent = state.you.length ?? state.you.body.length;
+  }
+}
+
+function animateHold() {
+  if (!holding) return;
+  const left = Math.max(0, 1 - (performance.now() - holdStart) / holdMs);
+  holdBar.style.width = (left * 100).toFixed(1) + "%";
+  holdBar.style.background = left > 0.5 ? "var(--ok)" : left > 0.2 ? "var(--warn)" : "var(--bad)";
+  if (left > 0) requestAnimationFrame(animateHold);
+}
+
+// ---- screen wake lock ---------------------------------------------------------
+
+let wakeLock = null;
+async function holdWakeLock() {
+  if (!("wakeLock" in navigator) || document.visibilityState !== "visible") return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+  } catch (_) {
+    wakeLock = null;
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    holdWakeLock();
+    focusKeyField();
+  }
+});
+
+holdWakeLock();
+focusKeyField();
+connect();
+</script>
+</body>
+</html>

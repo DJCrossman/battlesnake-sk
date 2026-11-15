@@ -282,10 +282,7 @@ mod tests {
         );
         let state = parse(&json);
         let mv = choose_move(&state);
-        assert!(
-            [Direction::Right, Direction::Down].contains(&mv),
-            "{mv:?}"
-        );
+        assert!([Direction::Right, Direction::Down].contains(&mv), "{mv:?}");
         assert!(score_of(&state, mv) > 0.0);
     }
 
@@ -414,7 +411,11 @@ mod tests {
         let per_move = started.elapsed() / runs;
         println!("worst-case autopilot move: {per_move:?}");
         // Debug builds are ~20x slower than release; the bound is for release.
-        let bound = if cfg!(debug_assertions) { 20_000 } else { 1_000 };
+        let bound = if cfg!(debug_assertions) {
+            20_000
+        } else {
+            1_000
+        };
         assert!(per_move.as_micros() < bound, "{per_move:?}");
     }
 }

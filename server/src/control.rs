@@ -227,7 +227,10 @@ mod tests {
         // Up runs into the other snake's head cell (its neck next turn); right is free.
         queue.push(Direction::Up);
         queue.push(Direction::Right);
-        assert_eq!(queue.take_usable(&state, Mode::Assist), Some(Direction::Right));
+        assert_eq!(
+            queue.take_usable(&state, Mode::Assist),
+            Some(Direction::Right)
+        );
         assert!(queue.is_empty());
 
         queue.push(Direction::Down);
@@ -241,14 +244,23 @@ mod tests {
         let mut queue = InputQueue::default();
         queue.push(Direction::Left);
         queue.push(Direction::Down);
-        assert_eq!(queue.take_usable(&state, Mode::Manual), Some(Direction::Down));
+        assert_eq!(
+            queue.take_usable(&state, Mode::Manual),
+            Some(Direction::Down)
+        );
     }
 
     #[test]
     fn deadline_goes_straight_when_it_is_safe() {
         let state = bottom_row();
-        assert_eq!(move_at_deadline(&state, Mode::Assist), Some(Direction::Right));
-        assert_eq!(move_at_deadline(&state, Mode::Manual), Some(Direction::Right));
+        assert_eq!(
+            move_at_deadline(&state, Mode::Assist),
+            Some(Direction::Right)
+        );
+        assert_eq!(
+            move_at_deadline(&state, Mode::Manual),
+            Some(Direction::Right)
+        );
     }
 
     #[test]

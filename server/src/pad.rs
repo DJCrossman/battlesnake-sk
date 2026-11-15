@@ -42,8 +42,13 @@ async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
     let pads = app.pads.fetch_add(1, Ordering::AcqRel) + 1;
     info!(pads, "pad connected");
     let hello = format!(r#"{{"t":"hello","mode":"{}"}}"#, app.mode().as_str());
-    if socket.send(Message::Text(hello.into())).await.is_ok() {
-        loop {
+    let mut outgoing = Some(Message::Text(hello.into()));
+    // Each turn of the loop sends at most one frame: the hello, an echo or a broadcast event.
+    while let Some(frame) = outgoing.take() {
+        if socket.send(frame).await.is_err() {
+            break;
+        }
+        while outgoing.is_none() {
             tokio::select! {
                 incoming = socket.recv() => match incoming {
                     Some(Ok(Message::Binary(bytes))) => match bytes.first() {
@@ -54,22 +59,14 @@ async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
                             }
                         }
                         Some(4) => press_mode_button(&app),
-                        Some(5) => {
-                            if socket.send(Message::Binary(bytes)).await.is_err() {
-                                break;
-                            }
-                        }
+                        Some(5) => outgoing = Some(Message::Binary(bytes)),
                         _ => {}
                     },
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     Some(Ok(_)) => {}
                 },
                 event = events.recv() => match event {
-                    Ok(frame) => {
-                        if socket.send(Message::Text(frame)).await.is_err() {
-                            break;
-                        }
-                    }
+                    Ok(frame) => outgoing = Some(Message::Text(frame)),
                     Err(RecvError::Lagged(_)) => {}
                     Err(RecvError::Closed) => break,
                 },
@@ -84,9 +81,9 @@ async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
 
 /// Assist → manual → auto → assist, announced to every pad.
 fn press_mode_button(app: &App) {
-    let previous = app
-        .mode
-        .update(Ordering::AcqRel, Ordering::Acquire, |m| Mode::from(m).next().into());
+    let previous = app.mode.update(Ordering::AcqRel, Ordering::Acquire, |m| {
+        Mode::from(m).next().into()
+    });
     let mode = Mode::from(previous).next();
     info!(mode = mode.as_str(), "mode changed");
     app.broadcast(format!(r#"{{"t":"mode","mode":"{}"}}"#, mode.as_str()));
