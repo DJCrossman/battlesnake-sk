@@ -1,0 +1,234 @@
+#include <furi.h>
+#include <furi_hal_bt.h>
+#include <furi_hal_usb_hid.h>
+#include <furi_hal_version.h>
+#include <bt/bt_service/bt.h>
+#include <extra_profiles/hid_profile.h>
+#include <gui/gui.h>
+#include <input/input.h>
+#include <notification/notification_messages.h>
+#include <storage/storage.h>
+
+#include "links.h"
+
+typedef enum {
+    KeyboardLinkEventInput,
+    KeyboardLinkEventBtStatus,
+} KeyboardLinkEventType;
+
+typedef struct {
+    KeyboardLinkEventType type;
+    union {
+        InputEvent input;
+        BtStatus bt_status;
+    };
+} KeyboardLinkEvent;
+
+// iOS 18.4+ Safari can drop keydown/keyup from keyboard+mouse HID devices, but letters typed
+// into a focused text field still arrive, so the page also accepts WASD.
+typedef enum {
+    KeyboardLinkKeySetArrows,
+    KeyboardLinkKeySetWasd,
+    KeyboardLinkKeySetCount,
+} KeyboardLinkKeySet;
+
+static const uint16_t hid_key_for_button[KeyboardLinkKeySetCount][InputKeyMAX] = {
+    [KeyboardLinkKeySetArrows] =
+        {
+            [InputKeyUp] = HID_KEYBOARD_UP_ARROW,
+            [InputKeyDown] = HID_KEYBOARD_DOWN_ARROW,
+            [InputKeyLeft] = HID_KEYBOARD_LEFT_ARROW,
+            [InputKeyRight] = HID_KEYBOARD_RIGHT_ARROW,
+            [InputKeyOk] = HID_KEYBOARD_SPACEBAR,
+        },
+    [KeyboardLinkKeySetWasd] =
+        {
+            [InputKeyUp] = HID_KEYBOARD_W,
+            [InputKeyDown] = HID_KEYBOARD_S,
+            [InputKeyLeft] = HID_KEYBOARD_A,
+            [InputKeyRight] = HID_KEYBOARD_D,
+            [InputKeyOk] = HID_KEYBOARD_SPACEBAR,
+        },
+};
+
+typedef struct {
+    FuriMutex* mutex;
+    char adv_name[FURI_HAL_VERSION_DEVICE_NAME_LENGTH];
+    bool connected;
+    KeyboardLinkKeySet key_set;
+    uint8_t held; // one bit per InputKey
+    uint32_t presses_sent;
+} KeyboardLinkState;
+
+static void keyboard_link_draw(Canvas* canvas, void* context);
+static void keyboard_link_forward_input(InputEvent* input, void* context);
+static void keyboard_link_forward_bt_status(BtStatus status, void* context);
+static bool keyboard_link_tap(FuriHalBleProfileBase* hid, uint16_t key);
+
+void keyboard_link_run(void) {
+    // Same name the HID profile advertises: "<prefix> <flipper name>"
+    KeyboardLinkState state = {.mutex = furi_mutex_alloc(FuriMutexTypeNormal)};
+    const char* flipper_name = furi_hal_version_get_name_ptr();
+    snprintf(
+        state.adv_name, sizeof(state.adv_name), "Snake %s", flipper_name ? flipper_name : "");
+
+    FuriMessageQueue* queue = furi_message_queue_alloc(16, sizeof(KeyboardLinkEvent));
+
+    ViewPort* view_port = view_port_alloc();
+    view_port_draw_callback_set(view_port, keyboard_link_draw, &state);
+    view_port_input_callback_set(view_port, keyboard_link_forward_input, queue);
+    Gui* gui = furi_record_open(RECORD_GUI);
+    gui_add_view_port(gui, view_port, GuiLayerFullscreen);
+
+    NotificationApp* notifications = furi_record_open(RECORD_NOTIFICATION);
+    notification_message(notifications, &sequence_display_backlight_enforce_on);
+    notification_message(notifications, &sequence_blink_start_blue);
+
+    // Switch to the HID keyboard profile the way the stock Bluetooth Remote app does,
+    // with its own bonding-key file so the normal Flipper pairing stays untouched.
+    Bt* bt = furi_record_open(RECORD_BT);
+    bt_disconnect(bt);
+    furi_delay_ms(200); // Wait for the 2nd core to update NVM storage
+    bt_keys_storage_set_storage_path(bt, APP_DATA_PATH(".bt_hid.keys"));
+    FuriHalBleProfileBase* hid = bt_profile_start(
+        bt,
+        ble_profile_hid,
+        &(BleProfileHidParams){.device_name_prefix = "Snake", .mac_xor = 0x5350});
+    furi_check(hid);
+    furi_hal_bt_start_advertising();
+    bt_set_status_changed_callback(bt, keyboard_link_forward_bt_status, queue);
+
+    KeyboardLinkEvent event;
+    bool running = true;
+    while(running) {
+        furi_check(furi_message_queue_get(queue, &event, FuriWaitForever) == FuriStatusOk);
+        furi_mutex_acquire(state.mutex, FuriWaitForever);
+
+        if(event.type == KeyboardLinkEventBtStatus) {
+            const bool connected = event.bt_status == BtStatusConnected;
+            if(connected && !state.connected) {
+                notification_message(notifications, &sequence_blink_stop);
+                notification_message(notifications, &sequence_set_only_green_255);
+            } else if(!connected && state.connected) {
+                notification_message(notifications, &sequence_reset_rgb);
+                notification_message(notifications, &sequence_blink_start_blue);
+            }
+            if(!connected) {
+                ble_profile_hid_kb_release_all(hid);
+            }
+            state.connected = connected;
+        } else if(event.input.key == InputKeyBack) {
+            if(event.input.type == InputTypeShort) {
+                state.key_set = (state.key_set + 1) % KeyboardLinkKeySetCount;
+            }
+            running = event.input.type != InputTypeLong;
+        } else if(event.input.type == InputTypePress) {
+            // Taps, not held keys: a held key would make the host auto-repeat it
+            state.held |= 1 << event.input.key;
+            if(keyboard_link_tap(hid, hid_key_for_button[state.key_set][event.input.key])) {
+                state.presses_sent++;
+            }
+        } else if(event.input.type == InputTypeRelease) {
+            state.held &= ~(1 << event.input.key);
+        }
+
+        furi_mutex_release(state.mutex);
+        view_port_update(view_port);
+    }
+
+    // Stop input first: nobody drains the queue during the Bluetooth teardown, and a full
+    // queue would block the GUI thread inside the input callback.
+    gui_remove_view_port(gui, view_port);
+
+    // Restore Bluetooth exactly as the stock app does on exit
+    ble_profile_hid_kb_release_all(hid);
+    bt_set_status_changed_callback(bt, NULL, NULL);
+    bt_disconnect(bt);
+    furi_delay_ms(200); // Wait for the 2nd core to update NVM storage
+    bt_keys_storage_set_default_path(bt);
+    furi_check(bt_profile_restore_default(bt));
+    furi_record_close(RECORD_BT);
+
+    notification_message(notifications, &sequence_blink_stop);
+    notification_message(notifications, &sequence_reset_rgb);
+    notification_message(notifications, &sequence_display_backlight_enforce_auto);
+    furi_record_close(RECORD_NOTIFICATION);
+
+    view_port_free(view_port);
+    furi_record_close(RECORD_GUI);
+    furi_message_queue_free(queue);
+    furi_mutex_free(state.mutex);
+}
+
+static void keyboard_link_draw(Canvas* canvas, void* context) {
+    KeyboardLinkState* state = context;
+    furi_mutex_acquire(state->mutex, FuriWaitForever);
+
+    canvas_clear(canvas);
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 11, "Snake Pad");
+
+    canvas_set_font(canvas, FontSecondary);
+    if(state->connected) {
+        canvas_draw_str(canvas, 2, 22, "Connected");
+    } else {
+        canvas_draw_str(canvas, 2, 22, "Pair me:");
+        canvas_draw_str(canvas, 2, 31, state->adv_name);
+    }
+
+    canvas_draw_str(
+        canvas, 2, 40, state->key_set == KeyboardLinkKeySetWasd ? "Keys: WASD" : "Keys: Arrows");
+
+    char sent[24];
+    snprintf(sent, sizeof(sent), "Sent: %lu", state->presses_sent);
+    canvas_draw_str(canvas, 2, 49, sent);
+
+    static const struct {
+        InputKey key;
+        uint8_t x;
+        uint8_t y;
+    } dpad[] = {
+        {InputKeyUp, 100, 11},
+        {InputKeyLeft, 87, 24},
+        {InputKeyOk, 100, 24},
+        {InputKeyRight, 113, 24},
+        {InputKeyDown, 100, 37},
+    };
+    for(size_t i = 0; i < COUNT_OF(dpad); i++) {
+        if(state->held & (1 << dpad[i].key)) {
+            canvas_draw_rbox(canvas, dpad[i].x, dpad[i].y, 11, 11, 2);
+        } else {
+            canvas_draw_rframe(canvas, dpad[i].x, dpad[i].y, 11, 11, 2);
+        }
+    }
+
+    canvas_draw_line(canvas, 0, 52, 127, 52);
+    canvas_draw_str(canvas, 2, 62, "OK:mode  Back:keys  Hold:exit");
+
+    furi_mutex_release(state->mutex);
+}
+
+static void keyboard_link_forward_input(InputEvent* input, void* context) {
+    KeyboardLinkEvent event = {.type = KeyboardLinkEventInput, .input = *input};
+    furi_message_queue_put(context, &event, FuriWaitForever);
+}
+
+static void keyboard_link_forward_bt_status(BtStatus status, void* context) {
+    KeyboardLinkEvent event = {.type = KeyboardLinkEventBtStatus, .bt_status = status};
+    furi_message_queue_put(context, &event, FuriWaitForever);
+}
+
+// Returns whether the key down was accepted. The key up is guaranteed to follow, because a
+// key left down on the host repeats forever.
+static bool keyboard_link_tap(FuriHalBleProfileBase* hid, uint16_t key) {
+    const bool sent = ble_profile_hid_kb_press(hid, key);
+
+    // No gap: each report update is copied into the radio core and queued as its own
+    // notification (never coalesced), so the host always sees the down before the up.
+    for(int attempt = 0; attempt < 3; attempt++) {
+        if(ble_profile_hid_kb_release(hid, key)) return sent;
+        furi_delay_ms(5);
+    }
+    ble_profile_hid_kb_release_all(hid);
+    return sent;
+}
