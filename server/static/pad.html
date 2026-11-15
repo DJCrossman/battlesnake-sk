@@ -40,6 +40,11 @@
   #mode[data-mode="assist"] { color: var(--ok); }
   #mode[data-mode="manual"] { color: var(--warn); }
   #mode[data-mode="auto"] { color: #60a5fa; }
+  #arm {
+    display: none; text-align: center; padding: 8px; border-radius: 8px;
+    background: #3b2f0b; border: 1px solid var(--warn); color: var(--warn); font-weight: 600;
+  }
+  #arm.shown { display: block; }
   #board-wrap { position: relative; width: 100%; aspect-ratio: 1; }
   canvas { width: 100%; height: 100%; display: block; border-radius: 10px; background: var(--panel); }
   #overlay {
@@ -54,8 +59,10 @@
   .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; min-width: 0; }
   .stat b { display: block; font-size: 11px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .05em; }
   .stat span { display: block; font-size: 17px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat small { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #help { color: var(--muted); font-size: 12px; text-align: center; }
-  #keys { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }
+  /* 16px stops iOS from zooming the page when the field takes focus. */
+  #keys { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; font-size: 16px; }
 </style>
 </head>
 <body>
@@ -63,6 +70,7 @@
     <div id="conn">offline</div>
     <div id="mode" data-mode="">—</div>
   </header>
+  <div id="arm">Tap to arm the keyboard</div>
   <div id="board-wrap">
     <canvas id="board" width="660" height="660"></canvas>
     <div id="overlay">Waiting for a game…</div>
@@ -72,7 +80,7 @@
     <div class="stat"><b>Turn</b><span id="turn">—</span></div>
     <div class="stat"><b>Health</b><span id="health">—</span></div>
     <div class="stat"><b>Length</b><span id="length">—</span></div>
-    <div class="stat"><b>Last move</b><span id="move">—</span></div>
+    <div class="stat"><b>Last move</b><span id="move">—</span><small id="source">&nbsp;</small></div>
     <div class="stat"><b>Round trip</b><span id="rtt">—</span></div>
     <div class="stat"><b>Last key via</b><span id="via">—</span></div>
   </div>
@@ -82,11 +90,10 @@
 <script>
 "use strict";
 const token = decodeURIComponent(location.hash.slice(1));
-const $ = (id) => document.getElementById(id);
-const canvas = $("board");
+const canvas = document.getElementById("board");
 const ctx = canvas.getContext("2d");
-const holdBar = $("hold").firstElementChild;
-const keyField = $("keys");
+const holdBar = document.getElementById("hold").firstElementChild;
+const keyField = document.getElementById("keys");
 
 const KEY_BYTES = {
   ArrowUp: 0, ArrowDown: 1, ArrowLeft: 2, ArrowRight: 3,
@@ -94,9 +101,15 @@ const KEY_BYTES = {
   " ": 4, Enter: 4,
 };
 const TEXT_BYTES = { w: 0, s: 1, a: 2, d: 3, " ": 4 };
+const STEPS = { up: [0, 1], down: [0, -1], left: [-1, 0], right: [1, 0] };
+// An echo request goes out every 2 s; no reply for this long means the socket is dead.
+const ECHO_DEADLINE_MS = 5000;
 
 let socket = null;
 let backoff = 500;
+let unansweredEchoSince = null;
+let rttMs = null;
+let lastState = null;
 let holdStart = 0;
 let holdMs = 0;
 let holding = false;
@@ -112,6 +125,7 @@ function connect() {
   const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
   ws.binaryType = "arraybuffer";
   socket = ws;
+  unansweredEchoSince = null;
   ws.onopen = () => ws.send(token);
   ws.onmessage = (event) => {
     if (typeof event.data === "string") {
@@ -119,26 +133,39 @@ function connect() {
     } else {
       const view = new DataView(event.data);
       if (view.byteLength >= 9 && view.getUint8(0) === 5) {
-        $("rtt").textContent = (performance.now() - view.getFloat64(1)).toFixed(0) + " ms";
+        unansweredEchoSince = null;
+        rttMs = performance.now() - view.getFloat64(1);
+        document.getElementById("rtt").textContent = rttMs.toFixed(0) + " ms";
       }
     }
   };
   ws.onclose = () => {
-    if (socket !== ws) return;
-    socket = null;
-    setConn("", "offline — retrying in " + (backoff / 1000).toFixed(1) + " s");
-    setTimeout(connect, backoff);
-    backoff = Math.min(backoff * 2, 8000);
+    if (socket === ws) reconnectLater();
   };
 }
 
+function reconnectLater() {
+  socket = null;
+  setConn("", "offline — retrying in " + (backoff / 1000).toFixed(1) + " s");
+  setTimeout(connect, backoff);
+  backoff = Math.min(backoff * 2, 8000);
+}
+
 function send(byte, via) {
-  $("via").textContent = via;
+  document.getElementById("via").textContent = via;
   if (socket && socket.readyState === WebSocket.OPEN) socket.send(new Uint8Array([byte]));
 }
 
 setInterval(() => {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (unansweredEchoSince !== null && performance.now() - unansweredEchoSince > ECHO_DEADLINE_MS) {
+    // The phone slept or changed network and the socket never noticed: drop it and start over.
+    const dead = socket;
+    reconnectLater();
+    dead.close();
+    return;
+  }
+  if (unansweredEchoSince === null) unansweredEchoSince = performance.now();
   const frame = new DataView(new ArrayBuffer(9));
   frame.setUint8(0, 5);
   frame.setFloat64(1, performance.now());
@@ -156,14 +183,15 @@ function onFrame(frame) {
       setMode(frame.mode);
       break;
     case "start":
-      $("overlay").textContent = "";
+      document.getElementById("overlay").textContent = "";
       draw(frame.state);
       break;
     case "turn":
-      $("overlay").textContent = "";
+      document.getElementById("overlay").textContent = "";
       setMode(frame.mode);
       draw(frame.state);
-      holdStart = performance.now();
+      // The server's deadline started half a round trip before this frame arrived.
+      holdStart = performance.now() - (rttMs ?? 0) / 2;
       holdMs = frame.hold_ms;
       holding = holdMs > 0;
       if (holding) requestAnimationFrame(animateHold); else holdBar.style.width = "0";
@@ -171,27 +199,47 @@ function onFrame(frame) {
     case "moved":
       holding = false;
       holdBar.style.width = "0";
-      $("move").textContent = frame.move + " · " + frame.source;
+      document.getElementById("move").textContent = frame.move;
+      document.getElementById("source").textContent = frame.source;
+      if (lastState && lastState.turn === frame.turn) draw(advanceOurSnake(lastState, frame.move));
       break;
     case "end":
       holding = false;
       holdBar.style.width = "0";
       draw(frame.state);
-      $("overlay").textContent = "Game over";
+      document.getElementById("overlay").textContent = "Game over";
       break;
   }
 }
 
 function setConn(cls, text) {
-  const el = $("conn");
+  const el = document.getElementById("conn");
   el.className = cls;
   el.textContent = text;
 }
 
 function setMode(mode) {
-  const el = $("mode");
+  const el = document.getElementById("mode");
   el.dataset.mode = mode;
   el.textContent = mode;
+}
+
+// Our snake as it is after the server's answer, so presses before the next turn frame aim from
+// where the head really is. Other snakes stay put until that frame replaces everything.
+function advanceOurSnake(state, move) {
+  const [dx, dy] = STEPS[move];
+  const you = state.you;
+  const head = { x: you.head.x + dx, y: you.head.y + dy };
+  const body = [head, ...you.body.slice(0, -1)];
+  return {
+    ...state,
+    turn: state.turn + 1,
+    you: { ...you, head, body },
+    board: {
+      ...state.board,
+      snakes: state.board.snakes.map((s) => (s.id === you.id ? { ...s, head, body } : s)),
+    },
+  };
 }
 
 // ---- input ------------------------------------------------------------------
@@ -226,35 +274,38 @@ keyField.addEventListener("input", () => {
   }
 });
 
-function focusKeyField() {
-  keyField.focus({ preventScroll: true });
+// iOS only lets a page focus a field during a user gesture, so after a reload or a return to
+// the tab the text path is dead until a tap. Say so instead of failing silently.
+function showArmHint() {
+  document.getElementById("arm").classList.toggle("shown", document.activeElement !== keyField);
 }
-document.addEventListener("pointerdown", focusKeyField);
-document.addEventListener("click", focusKeyField);
+keyField.addEventListener("focus", showArmHint);
+keyField.addEventListener("blur", showArmHint);
+document.addEventListener("click", () => keyField.focus({ preventScroll: true }));
 
 // ---- board ------------------------------------------------------------------
 
 function draw(state) {
+  lastState = state;
   const board = state.board;
   const size = Math.min(canvas.width / board.width, canvas.height / board.height);
-  const cx = (x) => x * size;
-  const cy = (y) => (board.height - 1 - y) * size;
+  const styles = getComputedStyle(document.documentElement);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--grid");
+  ctx.fillStyle = styles.getPropertyValue("--grid");
   for (let x = 0; x < board.width; x++) {
     for (let y = 0; y < board.height; y++) {
-      if ((x + y) % 2 === 0) ctx.fillRect(cx(x), cy(y), size, size);
+      if ((x + y) % 2 === 0) ctx.fillRect(x * size, (board.height - 1 - y) * size, size, size);
     }
   }
 
-  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--hazard");
-  for (const h of board.hazards || []) ctx.fillRect(cx(h.x), cy(h.y), size, size);
+  ctx.fillStyle = styles.getPropertyValue("--hazard");
+  for (const h of board.hazards || []) ctx.fillRect(h.x * size, (board.height - 1 - h.y) * size, size, size);
 
-  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--food");
+  ctx.fillStyle = styles.getPropertyValue("--food");
   for (const f of board.food || []) {
     ctx.beginPath();
-    ctx.arc(cx(f.x) + size / 2, cy(f.y) + size / 2, size * 0.28, 0, Math.PI * 2);
+    ctx.arc(f.x * size + size / 2, (board.height - 1 - f.y) * size + size / 2, size * 0.28, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -268,27 +319,28 @@ function draw(state) {
     const inset = mine ? size * 0.06 : size * 0.14;
     snake.body.forEach((p, i) => {
       if (i > 0 && p.x === snake.body[i - 1].x && p.y === snake.body[i - 1].y) return;
-      ctx.fillRect(cx(p.x) + inset, cy(p.y) + inset, size - inset * 2, size - inset * 2);
+      ctx.fillRect(p.x * size + inset, (board.height - 1 - p.y) * size + inset, size - inset * 2, size - inset * 2);
     });
-    const head = snake.head;
+    const hx = snake.head.x * size;
+    const hy = (board.height - 1 - snake.head.y) * size;
     if (mine) {
       ctx.globalAlpha = 1;
       ctx.lineWidth = Math.max(2, size * 0.1);
       ctx.strokeStyle = "#ffffff";
-      ctx.strokeRect(cx(head.x) + inset, cy(head.y) + inset, size - inset * 2, size - inset * 2);
+      ctx.strokeRect(hx + inset, hy + inset, size - inset * 2, size - inset * 2);
     }
     ctx.fillStyle = "#0e1014";
     ctx.globalAlpha = 1;
     ctx.beginPath();
-    ctx.arc(cx(head.x) + size / 2, cy(head.y) + size / 2, size * 0.1, 0, Math.PI * 2);
+    ctx.arc(hx + size / 2, hy + size / 2, size * 0.1, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.globalAlpha = 1;
 
-  $("turn").textContent = state.turn;
+  document.getElementById("turn").textContent = state.turn;
   if (state.you) {
-    $("health").textContent = state.you.health;
-    $("length").textContent = state.you.length ?? state.you.body.length;
+    document.getElementById("health").textContent = state.you.health;
+    document.getElementById("length").textContent = state.you.length ?? state.you.body.length;
   }
 }
 
@@ -302,24 +354,25 @@ function animateHold() {
 
 // ---- screen wake lock ---------------------------------------------------------
 
-let wakeLock = null;
 async function holdWakeLock() {
   if (!("wakeLock" in navigator) || document.visibilityState !== "visible") return;
   try {
-    wakeLock = await navigator.wakeLock.request("screen");
+    await navigator.wakeLock.request("screen");
   } catch (_) {
-    wakeLock = null;
+    // Not granted (low battery, unsupported context); the page still works.
   }
 }
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     holdWakeLock();
-    focusKeyField();
+    keyField.focus({ preventScroll: true });
   }
+  showArmHint();
 });
 
 holdWakeLock();
-focusKeyField();
+keyField.focus({ preventScroll: true });
+showArmHint();
 connect();
 </script>
 </body>
