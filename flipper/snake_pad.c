@@ -30,6 +30,25 @@ typedef enum {
     SnakePadKeySetCount,
 } SnakePadKeySet;
 
+static const uint16_t hid_key_for_button[SnakePadKeySetCount][InputKeyMAX] = {
+    [SnakePadKeySetArrows] =
+        {
+            [InputKeyUp] = HID_KEYBOARD_UP_ARROW,
+            [InputKeyDown] = HID_KEYBOARD_DOWN_ARROW,
+            [InputKeyLeft] = HID_KEYBOARD_LEFT_ARROW,
+            [InputKeyRight] = HID_KEYBOARD_RIGHT_ARROW,
+            [InputKeyOk] = HID_KEYBOARD_SPACEBAR,
+        },
+    [SnakePadKeySetWasd] =
+        {
+            [InputKeyUp] = HID_KEYBOARD_W,
+            [InputKeyDown] = HID_KEYBOARD_S,
+            [InputKeyLeft] = HID_KEYBOARD_A,
+            [InputKeyRight] = HID_KEYBOARD_D,
+            [InputKeyOk] = HID_KEYBOARD_SPACEBAR,
+        },
+};
+
 typedef struct {
     FuriMutex* mutex;
     char adv_name[FURI_HAL_VERSION_DEVICE_NAME_LENGTH];
@@ -42,6 +61,7 @@ typedef struct {
 static void snake_pad_draw(Canvas* canvas, void* context);
 static void snake_pad_forward_input(InputEvent* input, void* context);
 static void snake_pad_forward_bt_status(BtStatus status, void* context);
+static bool snake_pad_tap(FuriHalBleProfileBase* hid, uint16_t key);
 
 int32_t snake_pad_app(void* p) {
     UNUSED(p);
@@ -78,25 +98,6 @@ int32_t snake_pad_app(void* p) {
     furi_hal_bt_start_advertising();
     bt_set_status_changed_callback(bt, snake_pad_forward_bt_status, queue);
 
-    static const uint16_t hid_key_for_button[SnakePadKeySetCount][InputKeyMAX] = {
-        [SnakePadKeySetArrows] =
-            {
-                [InputKeyUp] = HID_KEYBOARD_UP_ARROW,
-                [InputKeyDown] = HID_KEYBOARD_DOWN_ARROW,
-                [InputKeyLeft] = HID_KEYBOARD_LEFT_ARROW,
-                [InputKeyRight] = HID_KEYBOARD_RIGHT_ARROW,
-                [InputKeyOk] = HID_KEYBOARD_SPACEBAR,
-            },
-        [SnakePadKeySetWasd] =
-            {
-                [InputKeyUp] = HID_KEYBOARD_W,
-                [InputKeyDown] = HID_KEYBOARD_S,
-                [InputKeyLeft] = HID_KEYBOARD_A,
-                [InputKeyRight] = HID_KEYBOARD_D,
-                [InputKeyOk] = HID_KEYBOARD_SPACEBAR,
-            },
-    };
-
     SnakePadEvent event;
     bool running = true;
     while(running) {
@@ -114,30 +115,30 @@ int32_t snake_pad_app(void* p) {
             }
             if(!connected) {
                 ble_profile_hid_kb_release_all(hid);
-                state.held = 0;
             }
             state.connected = connected;
         } else if(event.input.key == InputKeyBack) {
             if(event.input.type == InputTypeShort) {
-                ble_profile_hid_kb_release_all(hid);
-                state.held = 0;
                 state.key_set = (state.key_set + 1) % SnakePadKeySetCount;
             }
             running = event.input.type != InputTypeLong;
         } else if(event.input.type == InputTypePress) {
+            // Taps, not held keys: a held key would make the host auto-repeat it
             state.held |= 1 << event.input.key;
-            if(ble_profile_hid_kb_press(
-                   hid, hid_key_for_button[state.key_set][event.input.key])) {
+            if(snake_pad_tap(hid, hid_key_for_button[state.key_set][event.input.key])) {
                 state.presses_sent++;
             }
         } else if(event.input.type == InputTypeRelease) {
             state.held &= ~(1 << event.input.key);
-            ble_profile_hid_kb_release(hid, hid_key_for_button[state.key_set][event.input.key]);
         }
 
         furi_mutex_release(state.mutex);
         view_port_update(view_port);
     }
+
+    // Stop input first: nobody drains the queue during the Bluetooth teardown, and a full
+    // queue would block the GUI thread inside the input callback.
+    gui_remove_view_port(gui, view_port);
 
     // Restore Bluetooth exactly as the stock app does on exit
     ble_profile_hid_kb_release_all(hid);
@@ -153,7 +154,6 @@ int32_t snake_pad_app(void* p) {
     notification_message(notifications, &sequence_display_backlight_enforce_auto);
     furi_record_close(RECORD_NOTIFICATION);
 
-    gui_remove_view_port(gui, view_port);
     view_port_free(view_port);
     furi_record_close(RECORD_GUI);
     furi_message_queue_free(queue);
@@ -218,4 +218,19 @@ static void snake_pad_forward_input(InputEvent* input, void* context) {
 static void snake_pad_forward_bt_status(BtStatus status, void* context) {
     SnakePadEvent event = {.type = SnakePadEventBtStatus, .bt_status = status};
     furi_message_queue_put(context, &event, FuriWaitForever);
+}
+
+// Returns whether the key down was accepted. The key up is guaranteed to follow, because a
+// key left down on the host repeats forever.
+static bool snake_pad_tap(FuriHalBleProfileBase* hid, uint16_t key) {
+    const bool sent = ble_profile_hid_kb_press(hid, key);
+
+    // No gap: each report update is copied into the radio core and queued as its own
+    // notification (never coalesced), so the host always sees the down before the up.
+    for(int attempt = 0; attempt < 3; attempt++) {
+        if(ble_profile_hid_kb_release(hid, key)) return sent;
+        furi_delay_ms(5);
+    }
+    ble_profile_hid_kb_release_all(hid);
+    return sent;
 }
