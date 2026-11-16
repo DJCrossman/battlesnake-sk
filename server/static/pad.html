@@ -81,6 +81,11 @@
     <div id="conn">offline</div>
     <div id="mode" data-mode="">—</div>
   </header>
+  <div id="flipper" hidden>
+    <button id="flipper-connect" type="button">Connect Flipper screen</button>
+    <span id="flipper-link" data-link="off">Flipper: off</span>
+  </div>
+  <div id="flipper-unsupported" hidden>The Flipper screen needs Chrome on Android over HTTPS.</div>
   <div id="arm">Tap to arm the keyboard</div>
   <div id="board-wrap">
     <canvas id="board" width="660" height="660"></canvas>
@@ -96,11 +101,6 @@
     <div class="stat"><b>Last key via</b><span id="via">—</span></div>
   </div>
   <div id="help">Arrows / WASD steer · Space / Enter switches mode</div>
-  <div id="flipper" hidden>
-    <button id="flipper-connect" type="button">Connect Flipper screen</button>
-    <span id="flipper-link" data-link="off">Flipper: off</span>
-  </div>
-  <div id="flipper-unsupported" hidden>The Flipper screen needs Chrome on Android over HTTPS.</div>
   <input id="keys" type="text" autocomplete="off" autocorrect="off" autocapitalize="off"
          spellcheck="false" inputmode="none" aria-hidden="true" tabindex="-1">
 <script>
@@ -181,7 +181,7 @@ function connect() {
     setConn("", "no token in URL (#token)");
     return;
   }
-  setConn("connecting", "connecting…");
+  setConn("connecting", "Server: connecting…");
   const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
   ws.binaryType = "arraybuffer";
   socket = ws;
@@ -208,7 +208,7 @@ function reconnectLater() {
   socket = null;
   serverOnline = false;
   showOnFlipper(flipperScreen);
-  setConn("", "offline — retrying in " + (backoff / 1000).toFixed(1) + " s");
+  setConn("", "Server: offline — retrying in " + (backoff / 1000).toFixed(1) + " s");
   setTimeout(connect, backoff);
   backoff = Math.min(backoff * 2, 8000);
 }
@@ -239,7 +239,7 @@ function onFrame(frame) {
     case "hello":
       backoff = 500;
       serverOnline = true;
-      setConn("open", "connected");
+      setConn("open", "Server: connected");
       setMode(frame.mode);
       showOnFlipper(flipperScreen);
       break;
@@ -507,9 +507,11 @@ async function linkFlipper() {
     flipper.backoff = 1000;
     setFlipperLink("connected");
     showOnFlipper(flipperScreen);
-  } catch (_) {
+  } catch (error) {
     if (device === flipper.device) {
       setFlipperLink("lost");
+      // Why the link failed, where someone without a console open can read it back.
+      document.getElementById("flipper-link").textContent = "Flipper: lost (" + error.name + ")";
       retryFlipperLater();
     }
   } finally {
