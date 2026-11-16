@@ -14,8 +14,9 @@
 #include "board_frame.h"
 #include "links.h"
 
-// Received bytes wait here for the main loop; its size is the flow-control credit the phone gets.
-#define BOARD_LINK_RX_BUFFER_SIZE 1024
+// Flow-control credit announced to the phone. The receive buffer holds twice this, because the
+// firmware can re-announce full credit while up to one credit's worth of bytes is still unread.
+#define BOARD_LINK_RX_CREDIT 1024
 // An unconfirmed indication (phone not subscribed, or link gone) stops blocking TX after this.
 #define BOARD_LINK_TX_CONFIRM_TIMEOUT_MS 500
 
@@ -47,6 +48,7 @@ typedef struct {
 typedef struct {
     FuriMessageQueue* queue;
     FuriStreamBuffer* rx;
+    volatile bool rx_overflowed; // set on the Bluetooth thread when received bytes did not fit
     BoardFrameParser parser;
     BoardFrame incoming;
 
@@ -64,15 +66,15 @@ typedef struct {
     uint32_t frame_tick;
 } BoardLink;
 
+static void board_link_draw(Canvas* canvas, void* context);
+static void board_link_draw_cell(Canvas* canvas, BoardCell cell, uint8_t px, uint8_t py, uint8_t size);
+static void board_link_forward_input(InputEvent* input, void* context);
 static FuriHalBleProfileBase* board_link_profile_start(FuriHalBleProfileParams params);
 static void board_link_profile_stop(FuriHalBleProfileBase* profile);
 static void board_link_profile_gap_config(GapConfig* config, FuriHalBleProfileParams params);
-static void board_link_draw(Canvas* canvas, void* context);
-static void board_link_forward_input(InputEvent* input, void* context);
-static void board_link_forward_bt_status(BtStatus status, void* context);
 static uint16_t board_link_on_serial_event(SerialServiceEvent event, void* context);
+static void board_link_forward_bt_status(BtStatus status, void* context);
 static void board_link_send_pending(BoardLink* link, BoardLinkProfile* profile);
-static void board_link_draw_cell(Canvas* canvas, BoardCell cell, uint8_t px, uint8_t py, uint8_t size);
 
 static const FuriHalBleProfileTemplate board_link_profile = {
     .start = board_link_profile_start,
@@ -94,7 +96,7 @@ void board_link_run(void) {
     memset(link, 0, sizeof(BoardLink));
     link->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
     link->queue = furi_message_queue_alloc(16, sizeof(BoardLinkEvent));
-    link->rx = furi_stream_buffer_alloc(BOARD_LINK_RX_BUFFER_SIZE, 1);
+    link->rx = furi_stream_buffer_alloc(2 * BOARD_LINK_RX_CREDIT, 1);
     // Same name the profile advertises
     const char* flipper_name = furi_hal_version_get_name_ptr();
     snprintf(
@@ -118,7 +120,7 @@ void board_link_run(void) {
     BoardLinkProfile* profile = (BoardLinkProfile*)bt_profile_start(bt, &board_link_profile, NULL);
     furi_check(profile);
     ble_svc_serial_set_callbacks(
-        profile->serial, BOARD_LINK_RX_BUFFER_SIZE, board_link_on_serial_event, link);
+        profile->serial, BOARD_LINK_RX_CREDIT, board_link_on_serial_event, link);
     furi_hal_bt_start_advertising();
     bt_set_status_changed_callback(bt, board_link_forward_bt_status, link->queue);
 
@@ -157,27 +159,40 @@ void board_link_run(void) {
 
         board_link_send_pending(link, profile);
 
-        bool received = false;
-        uint8_t chunk[64];
-        size_t chunk_len;
-        while((chunk_len = furi_stream_buffer_receive(link->rx, chunk, sizeof(chunk), 0)) > 0) {
-            received = true;
-            for(size_t i = 0; i < chunk_len; i++) {
-                if(!board_frame_parser_feed(
-                       &link->parser, chunk[i], furi_get_tick(), &link->incoming)) {
-                    continue;
-                }
-                furi_mutex_acquire(link->mutex, FuriWaitForever);
-                link->frame = link->incoming;
-                link->has_frame = true;
-                link->frame_tick = furi_get_tick();
-                furi_mutex_release(link->mutex);
-                if(link->incoming.flags & BOARD_FLAG_GAME_STARTED) {
-                    notification_message(notifications, &sequence_single_vibro);
+        // Read everything the phone sent, then let the firmware re-announce credit. Bytes that
+        // land between the last read and the announcement are read on the next pass, and fit
+        // because the buffer holds twice the credit.
+        bool received;
+        do {
+            received = false;
+            uint8_t chunk[64];
+            size_t chunk_len;
+            while((chunk_len = furi_stream_buffer_receive(link->rx, chunk, sizeof(chunk), 0)) >
+                  0) {
+                received = true;
+                for(size_t i = 0; i < chunk_len; i++) {
+                    if(!board_frame_parser_feed(
+                           &link->parser, chunk[i], furi_get_tick(), &link->incoming)) {
+                        continue;
+                    }
+                    furi_mutex_acquire(link->mutex, FuriWaitForever);
+                    link->frame = link->incoming;
+                    link->has_frame = true;
+                    link->frame_tick = furi_get_tick();
+                    furi_mutex_release(link->mutex);
+                    if(link->incoming.flags & BOARD_FLAG_GAME_STARTED) {
+                        notification_message(notifications, &sequence_single_vibro);
+                    }
                 }
             }
+            if(received) ble_svc_serial_notify_buffer_is_empty(profile->serial);
+        } while(received);
+
+        // Bytes were lost: drop the frame they belonged to rather than mis-parse it
+        if(link->rx_overflowed) {
+            link->rx_overflowed = false;
+            board_frame_parser_reset(&link->parser);
         }
-        if(received) ble_svc_serial_notify_buffer_is_empty(profile->serial);
 
         view_port_update(view_port);
     }
@@ -185,11 +200,13 @@ void board_link_run(void) {
     // Stop input first: nobody drains the queue during the Bluetooth teardown
     gui_remove_view_port(gui, view_port);
 
-    // Restore Bluetooth exactly as the keyboard link does
-    ble_svc_serial_set_callbacks(profile->serial, 0, NULL, NULL);
+    // Restore Bluetooth exactly as the keyboard link does. Disconnect before clearing the serial
+    // callbacks: once no peer is connected nothing can write or confirm, so the firmware cannot
+    // call a callback as it is being cleared.
     bt_set_status_changed_callback(bt, NULL, NULL);
     bt_disconnect(bt);
     furi_delay_ms(200); // Wait for the 2nd core to update NVM storage
+    ble_svc_serial_set_callbacks(profile->serial, 0, NULL, NULL);
     bt_keys_storage_set_default_path(bt);
     furi_check(bt_profile_restore_default(bt));
     furi_record_close(RECORD_BT);
@@ -205,57 +222,6 @@ void board_link_run(void) {
     furi_message_queue_free(link->queue);
     furi_mutex_free(link->mutex);
     free(link);
-}
-
-static FuriHalBleProfileBase* board_link_profile_start(FuriHalBleProfileParams params) {
-    UNUSED(params);
-    BoardLinkProfile* profile = malloc(sizeof(BoardLinkProfile));
-    profile->base.config = &board_link_profile;
-    profile->dev_info = ble_svc_dev_info_start();
-    profile->battery = ble_svc_battery_start(true);
-    profile->serial = ble_svc_serial_start();
-    return &profile->base;
-}
-
-static void board_link_profile_stop(FuriHalBleProfileBase* base) {
-    furi_check(base && base->config == &board_link_profile);
-    BoardLinkProfile* profile = (BoardLinkProfile*)base;
-    ble_svc_battery_stop(profile->battery);
-    ble_svc_dev_info_stop(profile->dev_info);
-    ble_svc_serial_stop(profile->serial);
-    free(profile);
-}
-
-// The stock serial profile's GAP settings, with our own name and address so the phone sees a
-// separate device from the Flipper it already knows.
-static void board_link_profile_gap_config(GapConfig* config, FuriHalBleProfileParams params) {
-    UNUSED(params);
-    furi_check(config);
-    *config = (GapConfig){
-        .adv_service =
-            {
-                .UUID_Type = UUID_TYPE_16,
-                .Service_UUID_16 = 0x3080 | furi_hal_version_get_hw_color(),
-            },
-        .appearance_char = 0x8600,
-        .bonding_mode = true,
-        .pairing_method = GapPairingPinCodeShow,
-        .conn_param =
-            {
-                .conn_int_min = 0x06, // 7.5 ms
-                .conn_int_max = 0x24, // 45 ms
-            },
-    };
-    memcpy(config->mac_address, furi_hal_version_get_ble_mac(), sizeof(config->mac_address));
-    config->mac_address[0] ^= 0x44; // mac_xor 0x4244 ("BD"); the keyboard link uses 0x5350
-    config->mac_address[1] ^= 0x42;
-    const char* flipper_name = furi_hal_version_get_name_ptr();
-    snprintf(
-        config->adv_name,
-        sizeof(config->adv_name),
-        "%cBoard %s",
-        furi_hal_version_get_ble_local_device_name_ptr()[0], // advertising data type byte
-        flipper_name ? flipper_name : "");
 }
 
 static void board_link_draw(Canvas* canvas, void* context) {
@@ -326,57 +292,13 @@ static void board_link_draw(Canvas* canvas, void* context) {
         const uint32_t hold_ms = frame->hold_10ms * 10;
         const uint32_t elapsed_ms = furi_get_tick() - link->frame_tick;
         if(hold_ms > 0 && !(frame->flags & BOARD_FLAG_GAME_OVER)) {
-            const uint32_t left_ms = elapsed_ms < hold_ms ? hold_ms - elapsed_ms : 0;
             canvas_draw_frame(canvas, 68, 56, 58, 7);
-            canvas_draw_box(canvas, 69, 57, 56 * left_ms / hold_ms, 5);
+            canvas_draw_box(
+                canvas, 69, 57, elapsed_ms < hold_ms ? 56 * (hold_ms - elapsed_ms) / hold_ms : 0, 5);
         }
     }
 
     furi_mutex_release(link->mutex);
-}
-
-static void board_link_forward_input(InputEvent* input, void* context) {
-    BoardLinkEvent event = {.type = BoardLinkEventInput, .input = *input};
-    furi_message_queue_put(context, &event, FuriWaitForever);
-}
-
-static void board_link_forward_bt_status(BtStatus status, void* context) {
-    BoardLinkEvent event = {.type = BoardLinkEventBtStatus, .bt_status = status};
-    furi_message_queue_put(context, &event, FuriWaitForever);
-}
-
-// Runs on the Bluetooth GAP thread with the serial service locked: hand the bytes to the main
-// loop and never block here.
-static uint16_t board_link_on_serial_event(SerialServiceEvent event, void* context) {
-    BoardLink* link = context;
-    if(event.event == SerialServiceEventTypeDataReceived) {
-        furi_stream_buffer_send(link->rx, event.data.buffer, event.data.size, 0);
-        BoardLinkEvent wake = {.type = BoardLinkEventDataReceived};
-        furi_message_queue_put(link->queue, &wake, 0);
-    } else if(event.event == SerialServiceEventTypeDataSent) {
-        BoardLinkEvent sent = {.type = BoardLinkEventDataSent};
-        furi_message_queue_put(link->queue, &sent, 0);
-    }
-    // SerialServiceEventTypesBleResetRequest (RPC status written to 0): there is no RPC here
-    return furi_stream_buffer_spaces_available(link->rx);
-}
-
-// Button bytes go out as one indication at a time; presses made while one is unconfirmed are
-// batched into the next.
-static void board_link_send_pending(BoardLink* link, BoardLinkProfile* profile) {
-    if(link->tx_in_flight &&
-       furi_get_tick() - link->tx_sent_tick > BOARD_LINK_TX_CONFIRM_TIMEOUT_MS) {
-        link->tx_in_flight = false;
-    }
-    if(link->tx_in_flight || link->tx_pending_len == 0) return;
-
-    // Without a connection there is no one to send to; the bytes are dropped either way
-    if(link->connected &&
-       ble_svc_serial_update_tx(profile->serial, link->tx_pending, link->tx_pending_len)) {
-        link->tx_in_flight = true;
-        link->tx_sent_tick = furi_get_tick();
-    }
-    link->tx_pending_len = 0;
 }
 
 // How each kind of cell looks at a given cell size. Mine is solid with a hollow-centred head;
@@ -429,4 +351,102 @@ static void board_link_draw_cell(Canvas* canvas, BoardCell cell, uint8_t px, uin
         }
         break;
     }
+}
+
+static void board_link_forward_input(InputEvent* input, void* context) {
+    BoardLinkEvent event = {.type = BoardLinkEventInput, .input = *input};
+    furi_message_queue_put(context, &event, FuriWaitForever);
+}
+
+static FuriHalBleProfileBase* board_link_profile_start(FuriHalBleProfileParams params) {
+    UNUSED(params);
+    BoardLinkProfile* profile = malloc(sizeof(BoardLinkProfile));
+    profile->base.config = &board_link_profile;
+    profile->dev_info = ble_svc_dev_info_start();
+    profile->battery = ble_svc_battery_start(true);
+    profile->serial = ble_svc_serial_start();
+    return &profile->base;
+}
+
+static void board_link_profile_stop(FuriHalBleProfileBase* base) {
+    furi_check(base && base->config == &board_link_profile);
+    BoardLinkProfile* profile = (BoardLinkProfile*)base;
+    ble_svc_battery_stop(profile->battery);
+    ble_svc_dev_info_stop(profile->dev_info);
+    ble_svc_serial_stop(profile->serial);
+    free(profile);
+}
+
+// The stock serial profile's GAP settings, with our own name and address so the phone sees a
+// separate device from the Flipper it already knows.
+static void board_link_profile_gap_config(GapConfig* config, FuriHalBleProfileParams params) {
+    UNUSED(params);
+    furi_check(config);
+    *config = (GapConfig){
+        .adv_service =
+            {
+                .UUID_Type = UUID_TYPE_16,
+                .Service_UUID_16 = 0x3080 | furi_hal_version_get_hw_color(),
+            },
+        .appearance_char = 0x8600,
+        .bonding_mode = true,
+        .pairing_method = GapPairingPinCodeShow,
+        .conn_param =
+            {
+                .conn_int_min = 0x06, // 7.5 ms
+                .conn_int_max = 0x24, // 45 ms
+            },
+    };
+    memcpy(config->mac_address, furi_hal_version_get_ble_mac(), sizeof(config->mac_address));
+    config->mac_address[0] ^= 0x44; // mac_xor 0x4244 ("BD"); the keyboard link uses 0x5350
+    config->mac_address[1] ^= 0x42;
+    const char* flipper_name = furi_hal_version_get_name_ptr();
+    snprintf(
+        config->adv_name,
+        sizeof(config->adv_name),
+        "%cBoard %s",
+        furi_hal_version_get_ble_local_device_name_ptr()[0], // advertising data type byte
+        flipper_name ? flipper_name : "");
+}
+
+// Runs on the Bluetooth GAP thread with the serial service locked: hand the bytes to the main
+// loop and never block here.
+static uint16_t board_link_on_serial_event(SerialServiceEvent event, void* context) {
+    BoardLink* link = context;
+    if(event.event == SerialServiceEventTypeDataReceived) {
+        if(furi_stream_buffer_send(link->rx, event.data.buffer, event.data.size, 0) <
+           event.data.size) {
+            link->rx_overflowed = true;
+        }
+        BoardLinkEvent wake = {.type = BoardLinkEventDataReceived};
+        furi_message_queue_put(link->queue, &wake, 0);
+    } else if(event.event == SerialServiceEventTypeDataSent) {
+        BoardLinkEvent sent = {.type = BoardLinkEventDataSent};
+        furi_message_queue_put(link->queue, &sent, 0);
+    }
+    // SerialServiceEventTypesBleResetRequest (RPC status written to 0): there is no RPC here
+    return furi_stream_buffer_spaces_available(link->rx);
+}
+
+static void board_link_forward_bt_status(BtStatus status, void* context) {
+    BoardLinkEvent event = {.type = BoardLinkEventBtStatus, .bt_status = status};
+    furi_message_queue_put(context, &event, FuriWaitForever);
+}
+
+// Button bytes go out as one indication at a time; presses made while one is unconfirmed are
+// batched into the next.
+static void board_link_send_pending(BoardLink* link, BoardLinkProfile* profile) {
+    if(link->tx_in_flight &&
+       furi_get_tick() - link->tx_sent_tick > BOARD_LINK_TX_CONFIRM_TIMEOUT_MS) {
+        link->tx_in_flight = false;
+    }
+    if(link->tx_in_flight || link->tx_pending_len == 0) return;
+
+    // Without a connection there is no one to send to; the bytes are dropped either way
+    if(link->connected &&
+       ble_svc_serial_update_tx(profile->serial, link->tx_pending, link->tx_pending_len)) {
+        link->tx_in_flight = true;
+        link->tx_sent_tick = furi_get_tick();
+    }
+    link->tx_pending_len = 0;
 }
