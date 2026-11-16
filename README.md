@@ -4,15 +4,19 @@ A [Battlesnake](https://play.battlesnake.com) you steer in real time from a Flip
 autopilot behind you.
 
 ```
-Flipper Zero ──Bluetooth keyboard──▶ phone browser (/pad) ──WebSocket──▶ server ◀──/move── Battlesnake engine
- Snake Pad app                        live board + key relay              Rust, in memory
+Flipper Zero ◀──Bluetooth──▶ phone browser (/pad) ──WebSocket──▶ server ◀──/move── Battlesnake engine
+ Snake Pad app                live board + relay                  Rust, in memory
 ```
 
-- **`flipper/`** – the Snake Pad app. The Flipper pairs with your phone as a Bluetooth keyboard; the
-  D-pad sends arrow keys.
+- **`flipper/`** – the Snake Pad app. It talks to the phone over Bluetooth in one of two ways,
+  chosen when it starts:
+  - **Board** – a two-way link. The Flipper's screen shows the live board, and its buttons steer.
+    Needs Chrome on Android (Web Bluetooth) and the pad page served over HTTPS.
+  - **Keyboard** – the Flipper is a Bluetooth keyboard and the D-pad sends arrow keys. Works with
+    any phone browser, but the board is only on the phone.
 - **`server/`** – the Battlesnake server (Rust, axum). It also serves `/pad`, the page you keep open
-  on the phone: it draws the live board and relays each key press to the server as one byte over a
-  WebSocket.
+  on the phone: it draws the live board and relays each press to the server as one byte over a
+  WebSocket. In Board mode it also mirrors the board to the Flipper.
 
 ## How a move is decided
 
@@ -41,15 +45,16 @@ committed, so what you see is the position your next press applies to.
 
 ## Controls
 
-| Flipper button | Sends | Effect |
-| --- | --- | --- |
-| D-pad | Arrow keys (or W/A/S/D) | steer |
-| OK | Space | next mode: assist → manual → auto |
-| Back | – | switch between Arrow keys and W/A/S/D |
-| Hold Back | – | exit and restore the Flipper's normal Bluetooth |
+| Flipper button | Effect |
+| --- | --- |
+| D-pad | steer |
+| OK | next mode: assist → manual → auto |
+| Back (Keyboard link only) | switch between Arrow keys and W/A/S/D |
+| Hold Back | exit and restore the Flipper's normal Bluetooth |
 
-Each press sends a single key tap, so holding a button does not repeat. The pad page takes the same
-keys from any keyboard, which is handy for testing without the Flipper.
+On the Keyboard link the D-pad sends Arrow keys (or W/A/S/D) and OK sends Space, each as a single
+key tap, so holding a button does not repeat. The pad page takes the same keys from any keyboard,
+which is handy for testing without the Flipper.
 
 ## Run it locally
 
@@ -91,29 +96,87 @@ ufbt launch
 
 That installs the app under Apps → Bluetooth → Snake Pad and starts it.
 
-To play:
+`board_frame.c` (the parser for what the page sends) has no Flipper dependencies and a host test:
 
-1. Start Snake Pad on the Flipper. It advertises as `Snake <your Flipper's name>`.
-2. Pair with it in the phone's Bluetooth settings. This pairing is separate from the Flipper mobile
-   app's; that one is untouched.
-3. Open `http://<your server>/pad#<CONTROL_TOKEN>` on the phone and tap the page once. A banner
-   shows whenever the page needs that tap.
+```bash
+cc -std=c11 -Wall -Wextra -Werror board_frame.c board_frame_test.c -o /tmp/board_frame_test && /tmp/board_frame_test
+```
+
+### Play with the board on the Flipper (Board link)
+
+1. Start Snake Pad on the Flipper and choose **Board**. It advertises as
+   `Board <your Flipper's name>`.
+2. In Chrome on Android, open `https://<your server>/pad#<CONTROL_TOKEN>` and tap **Connect Flipper
+   screen**. Pick the Flipper from the list. The first time, Android asks for the PIN shown on the
+   Flipper.
+3. Start a game. The Flipper buzzes and shows the board; the bar at the bottom right is the time
+   left to press.
+
+The button only appears where the browser offers Web Bluetooth, which Chrome does on HTTPS pages and
+on `localhost`. Both links pair separately from the Flipper mobile app; that pairing is untouched.
+
+### Play with the board on the phone (Keyboard link)
+
+1. Start Snake Pad on the Flipper and choose **Keyboard**. It advertises as
+   `Snake <your Flipper's name>`.
+2. Pair with it in the phone's Bluetooth settings.
+3. Open `/pad#<CONTROL_TOKEN>` on the phone and tap the page once. A banner shows whenever the page
+   needs that tap.
 4. Start a game. The board appears as soon as the game is created.
 
 If the page does not react to the D-pad on an iPhone or iPad, press Back on the Flipper to switch to
 W/A/S/D. Some iOS versions do not pass key events from this kind of Bluetooth keyboard to web pages,
 but typed letters still arrive; the page's "Last key via" tile shows which path delivered a press.
 
+### Board link protocol
+
+The page and the Flipper talk over the Flipper's Bluetooth serial service.
+
+Flipper → page: one byte per button — `0` up, `1` down, `2` left, `3` right, `4` mode.
+
+Page → Flipper: a stream of frames, one each time the page redraws the board.
+
+```
+0x53            start marker
+len_lo len_hi   payload length (at most 400)
+payload:
+ [0] flags      bit0 game just started · bit1 game over · bit2 waiting for a game
+                bit3 board too large (over 25 wide or high) · bits 4-5 mode (0 assist, 1 manual, 2 auto)
+                bit6 the page lost the server
+ [1] width      [2] height
+ [3] turn low   [4] turn high
+ [5] health     [6] length
+ [7] hold       time left to press, in units of 10 ms
+ [8..] cells    one nibble each, top row first, first cell in the high nibble:
+                0 empty · 1 food · 2 hazard · 3 my body · 4 my head · 5 other body · 6 other head
+```
+
+The page never writes more bytes than the service's flow-control characteristic allows, and waits
+for the Flipper to announce room again when that reaches zero.
+
 ## Deploy
 
 Pushing to `main` deploys to AWS (ECS, via SST) from `.github/workflows/deploy.yml`; the image is
-built from `Dockerfile`.
+built from `Dockerfile`. The deploy log ends with two addresses:
+
+- `engine` – the load balancer, `http://….elb.amazonaws.com`. Register this one with Battlesnake;
+  the engine calls it directly.
+- `pad` – CloudFront, `https://….cloudfront.net`. Open `/pad#<token>` on this one. HTTPS is what
+  lets the page use Web Bluetooth and keep the phone's screen awake.
+
+Set the pad token once before the first deploy, with AWS credentials for the account, in the region
+the deploy runs in:
+
+```bash
+AWS_REGION=us-west-2 npx sst secret set ControlToken <token> --stage prod
+```
+
+The deploy fails until the secret is set. To change the token, set it again and redeploy.
 
 - The server keeps the game and pad state in memory, so it must run as exactly one task.
-- Set `CONTROL_TOKEN` on the service. Without it a new token is generated at every start and written
-  to the log.
-- The load balancer listens on plain HTTP, so the token is not encrypted in transit and the page
-  cannot keep the phone's screen awake (that needs HTTPS).
+- CloudFront caches nothing and forwards every request to the load balancer over plain HTTP, so
+  that last hop inside AWS is not encrypted.
+- The token is readable in the ECS task definition by anyone with access to the AWS account.
 - `/start`, `/move` and `/end` are open, as the Battlesnake API requires. Someone who knows the URL
   can start a game against the snake, and the pad follows the most recently started game.
 
