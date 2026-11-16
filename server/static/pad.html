@@ -132,10 +132,12 @@ const FLIPPER_TX = "19ed82ae-ed21-4c9d-4145-228e61fe0000";
 // Big-endian uint32: how many more bytes the Flipper will accept. Each write spends it; the
 // Flipper notifies the full buffer size again only once it is spent to exactly 0 and drained.
 const FLIPPER_FLOW = "19ed82ae-ed21-4c9d-4145-228e63fe0000";
-// One write per chunk. 243 is the firmware's own characteristic chunk and fits the MTU it
-// negotiates; 20 fits the 23-byte default MTU when a larger write is refused.
-const FLIPPER_CHUNK = 243;
-const FLIPPER_SMALL_CHUNK = 20;
+// Bytes per write. The Flipper never starts an MTU exchange, so the MTU may stay at the default
+// 23, and Android then silently trims a longer write without response to 20 bytes while
+// reporting success, so the page would spend credit for bytes that never arrived.
+const FLIPPER_CHUNK = 20;
+// Attempts per chunk before the link is treated as lost.
+const FLIPPER_WRITE_ATTEMPTS = 3;
 // Cell codes on the Flipper, and which wins when several things share a cell.
 const CELL = { empty: 0, food: 1, hazard: 2, myBody: 3, myHead: 4, otherBody: 5, otherHead: 6 };
 const CELL_RANK = [0, 2, 1, 4, 6, 3, 5];
@@ -144,20 +146,25 @@ const MODE_BITS = { assist: 0, manual: 1, auto: 2 };
 let socket = null;
 let serverOnline = false;
 let currentMode = "assist";
-// What the Flipper should show; resent when the link, the mode or the server connection changes.
-let flipperScreen = { state: null };
+// What the Flipper should show: { state (null = no game), over, holdEndsAt (performance.now()
+// time the hold ends, 0 = none) }. Resent when the link, the mode or the server connection
+// changes; the frame is encoded when it is written, so the hold it carries is the time left then.
+let flipperScreen = { state: null, over: false, holdEndsAt: 0 };
 const flipper = {
   device: null,
   rx: null,
   link: "off",
+  linking: false,
   backoff: 1000,
   retry: null,
-  chunk: FLIPPER_CHUNK,
   // Bytes the Flipper will still accept (Infinity if it does not publish flow control).
   credit: Infinity,
   creditArrived: null,
   writing: false,
-  newestFrame: null,
+  pendingScreen: null,
+  // Games started vs. game-start flags actually written, so the flag survives being overtaken.
+  startsRequested: 0,
+  startsWritten: 0,
 };
 let backoff = 500;
 let unansweredEchoSince = null;
@@ -200,7 +207,7 @@ function connect() {
 function reconnectLater() {
   socket = null;
   serverOnline = false;
-  showOnFlipper({ ...flipperScreen, started: false });
+  showOnFlipper(flipperScreen);
   setConn("", "offline — retrying in " + (backoff / 1000).toFixed(1) + " s");
   setTimeout(connect, backoff);
   backoff = Math.min(backoff * 2, 8000);
@@ -234,7 +241,7 @@ function onFrame(frame) {
       serverOnline = true;
       setConn("open", "connected");
       setMode(frame.mode);
-      showOnFlipper({ ...flipperScreen, started: false });
+      showOnFlipper(flipperScreen);
       break;
     case "mode":
       setMode(frame.mode);
@@ -242,7 +249,8 @@ function onFrame(frame) {
     case "start":
       document.getElementById("overlay").textContent = "";
       draw(frame.state);
-      showOnFlipper({ state: frame.state, started: true });
+      flipper.startsRequested++;
+      showOnFlipper({ state: frame.state, over: false, holdEndsAt: 0 });
       break;
     case "turn":
       document.getElementById("overlay").textContent = "";
@@ -253,7 +261,7 @@ function onFrame(frame) {
       holdMs = frame.hold_ms;
       holding = holdMs > 0;
       if (holding) requestAnimationFrame(animateHold); else holdBar.style.width = "0";
-      showOnFlipper({ state: frame.state, holdMs: Math.max(0, holdMs - (rttMs ?? 0) / 2) });
+      showOnFlipper({ state: frame.state, over: false, holdEndsAt: holding ? holdStart + holdMs : 0 });
       break;
     case "moved":
       holding = false;
@@ -263,7 +271,9 @@ function onFrame(frame) {
       if (lastState && lastState.turn === frame.turn) {
         const next = advanceOurSnake(lastState, frame.move);
         draw(next);
-        showOnFlipper({ state: next });
+        showOnFlipper({ state: next, over: false, holdEndsAt: 0 });
+      } else {
+        showOnFlipper({ ...flipperScreen, holdEndsAt: 0 });
       }
       break;
     case "end":
@@ -271,7 +281,9 @@ function onFrame(frame) {
       holdBar.style.width = "0";
       draw(frame.state);
       document.getElementById("overlay").textContent = "Game over";
-      showOnFlipper({ state: frame.state, over: true });
+      // A start the Flipper never saw is stale once the game is over.
+      flipper.startsWritten = flipper.startsRequested;
+      showOnFlipper({ state: frame.state, over: true, holdEndsAt: 0 });
       break;
   }
 }
@@ -288,7 +300,7 @@ function setMode(mode) {
   el.textContent = mode;
   if (mode !== currentMode) {
     currentMode = mode;
-    showOnFlipper({ ...flipperScreen, started: false });
+    showOnFlipper(flipperScreen);
   }
 }
 
@@ -447,36 +459,37 @@ document.getElementById("flipper-connect").addEventListener("click", async () =>
   } catch (_) {
     return; // The chooser was dismissed.
   }
+  // A click replaces any retry that was waiting; linkFlipper itself refuses to run twice.
+  clearTimeout(flipper.retry);
+  flipper.retry = null;
   if (flipper.device && flipper.device !== device && flipper.device.gatt.connected) {
     flipper.device.gatt.disconnect();
   }
   flipper.device = device;
   flipper.backoff = 1000;
   device.ongattserverdisconnected = (event) => {
-    if (event.target !== flipper.device) return;
-    flipper.rx = null;
-    setFlipperLink("lost");
-    if (flipper.creditArrived) flipper.creditArrived();
-    retryFlipperLater();
+    // A late event for a link that has already been re-established is not a loss.
+    if (event.target === flipper.device && !flipper.device.gatt.connected) loseFlipperLink();
   };
   linkFlipper();
 });
 
+// Connects to `flipper.device`. At most one attempt runs at a time, and none while connected.
 async function linkFlipper() {
+  if (flipper.linking || flipper.link === "connected") return;
   const device = flipper.device;
+  flipper.linking = true;
   setFlipperLink("connecting");
   try {
-    const server = await device.gatt.connect();
-    const service = await server.getPrimaryService(FLIPPER_SERVICE);
+    const service = await (await device.gatt.connect()).getPrimaryService(FLIPPER_SERVICE);
     const [rx, tx, flow] = await Promise.all(
       [FLIPPER_RX, FLIPPER_TX, FLIPPER_FLOW].map((uuid) => service.getCharacteristic(uuid)),
     );
-    flipper.credit = Infinity;
+    flow.oncharacteristicvaluechanged = (event) => {
+      flipper.credit = event.target.value.getUint32(0);
+      if (flipper.creditArrived) flipper.creditArrived();
+    };
     try {
-      flow.oncharacteristicvaluechanged = (event) => {
-        flipper.credit = event.target.value.getUint32(0);
-        if (flipper.creditArrived) flipper.creditArrived();
-      };
       await flow.startNotifications();
       flipper.credit = (await flow.readValue()).getUint32(0);
     } catch (_) {
@@ -489,17 +502,27 @@ async function linkFlipper() {
       }
     };
     await tx.startNotifications();
-    if (device !== flipper.device) return;
+    if (device !== flipper.device) return; // Another device was picked meanwhile; see finally.
     flipper.rx = rx;
-    flipper.chunk = FLIPPER_CHUNK;
     flipper.backoff = 1000;
     setFlipperLink("connected");
-    showOnFlipper({ ...flipperScreen, started: false });
+    showOnFlipper(flipperScreen);
   } catch (_) {
-    if (device !== flipper.device) return;
-    setFlipperLink("lost");
-    retryFlipperLater();
+    if (device === flipper.device) {
+      setFlipperLink("lost");
+      retryFlipperLater();
+    }
+  } finally {
+    flipper.linking = false;
+    if (device !== flipper.device) linkFlipper();
   }
+}
+
+function loseFlipperLink() {
+  flipper.rx = null;
+  setFlipperLink("lost");
+  if (flipper.creditArrived) flipper.creditArrived();
+  retryFlipperLater();
 }
 
 function retryFlipperLater() {
@@ -519,34 +542,44 @@ function setFlipperLink(link) {
   showArmHint();
 }
 
-// Records what the Flipper should show and sends it. Only the newest frame waits to be sent:
-// a frame produced while another is being written replaces any frame still waiting.
+// Records what the Flipper should show and sends it. Only the newest screen waits to be sent:
+// one produced while a frame is being written replaces any screen still waiting.
 function showOnFlipper(screen) {
   flipperScreen = screen;
   if (flipper.link !== "connected") return;
-  flipper.newestFrame = encodeFlipperFrame(screen, currentMode, !serverOnline);
+  flipper.pendingScreen = screen;
   if (!flipper.writing) writeNewestFrames();
 }
 
 async function writeNewestFrames() {
   flipper.writing = true;
   try {
-    while (flipper.newestFrame && flipper.rx) {
-      const frame = flipper.newestFrame;
-      flipper.newestFrame = null;
-      await writeFrame(frame);
+    while (flipper.pendingScreen && flipper.rx) {
+      const screen = flipper.pendingScreen;
+      flipper.pendingScreen = null;
+      const starts = flipper.startsRequested;
+      const started = starts > flipper.startsWritten;
+      // Encoded now, so mode, server state and the hold left are current when it goes out.
+      await writeFrame(
+        encodeFlipperFrame({ ...screen, started }, currentMode, !serverOnline, performance.now()),
+      );
+      if (started) flipper.startsWritten = starts;
     }
   } catch (_) {
-    // The link dropped mid-frame; reconnecting resends the current screen.
+    // writeFrame dropped the link; once it is back, linkFlipper sends the current screen.
   }
   flipper.writing = false;
 }
 
-// One write in flight at a time, each within the chunk size and the Flipper's remaining buffer.
+// Writes one frame, one chunk in flight at a time, never past the Flipper's remaining buffer.
+// A chunk that keeps failing drops the link: a frame is either delivered whole or abandoned with
+// a reconnect, never followed by another frame's bytes.
 async function writeFrame(frame) {
   let offset = 0;
   while (offset < frame.length) {
-    if (flipper.credit === 0) {
+    // The Flipper may announce 0 while a write is in flight, so the count can dip below 0.
+    while (flipper.credit <= 0) {
+      if (!flipper.rx) throw new Error("Flipper link lost");
       await new Promise((resolve) => {
         flipper.creditArrived = () => {
           flipper.creditArrived = null;
@@ -556,28 +589,32 @@ async function writeFrame(frame) {
     }
     const rx = flipper.rx;
     if (!rx) throw new Error("Flipper link lost");
-    const size = Math.min(flipper.chunk, flipper.credit, frame.length - offset);
+    const size = Math.min(FLIPPER_CHUNK, flipper.credit, frame.length - offset);
     const chunk = frame.subarray(offset, offset + size);
-    try {
-      if (rx.properties.writeWithoutResponse) {
-        await rx.writeValueWithoutResponse(chunk);
-      } else {
-        await rx.writeValueWithResponse(chunk);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await (rx.properties.writeWithoutResponse
+          ? rx.writeValueWithoutResponse(chunk)
+          : rx.writeValueWithResponse(chunk));
+        break;
+      } catch (error) {
+        if (!flipper.rx) throw error;
+        if (attempt === FLIPPER_WRITE_ATTEMPTS) {
+          const device = flipper.device;
+          loseFlipperLink();
+          if (device.gatt.connected) device.gatt.disconnect();
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
       }
-    } catch (error) {
-      if (size > FLIPPER_SMALL_CHUNK) {
-        flipper.chunk = FLIPPER_SMALL_CHUNK;
-        continue;
-      }
-      throw error;
     }
     flipper.credit -= size;
     offset += size;
   }
 }
 
-// `screen`: { state (null = no game), started, over, holdMs }.
-function encodeFlipperFrame(screen, mode, offline) {
+// `screen`: { state (null = no game), started, over, holdEndsAt }; `now` is performance.now().
+function encodeFlipperFrame(screen, mode, offline, now) {
   const state = screen.state;
   const board = state && state.board;
   const fits = board && board.width <= 25 && board.height <= 25;
@@ -614,7 +651,7 @@ function encodeFlipperFrame(screen, mode, offline) {
   payload[4] = turn >> 8;
   payload[5] = you ? Math.min(255, Math.max(0, you.health)) : 0;
   payload[6] = you ? Math.min(255, you.length ?? you.body.length) : 0;
-  payload[7] = Math.min(255, Math.floor((screen.holdMs || 0) / 10));
+  payload[7] = Math.min(255, Math.floor(Math.max(0, (screen.holdEndsAt || 0) - now) / 10));
   cells.forEach((code, i) => {
     payload[8 + (i >> 1)] |= i % 2 === 0 ? code << 4 : code;
   });
