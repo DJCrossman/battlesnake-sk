@@ -107,13 +107,13 @@ cc -std=c11 -Wall -Wextra -Werror board_frame.c board_frame_test.c -o /tmp/board
 1. Start Snake Pad on the Flipper and choose **Board**. It advertises as
    `Board <your Flipper's name>`.
 2. In Chrome on Android, open `https://<your server>/pad#<CONTROL_TOKEN>` and tap **Connect Flipper
-   screen**. Pick the Flipper from the list. The first time, Android asks for the PIN shown on the
-   Flipper.
+   screen**. Pick the Flipper from the list. There is no pairing: no PIN and no prompt.
 3. Start a game. The Flipper buzzes and shows the board; the bar at the bottom right is the time
    left to press.
 
 The button only appears where the browser offers Web Bluetooth, which Chrome does on HTTPS pages and
-on `localhost`. Both links pair separately from the Flipper mobile app; that pairing is untouched.
+on `localhost`. The Keyboard link pairs separately from the Flipper mobile app, and the Board link
+does not pair at all; the mobile app's pairing is untouched.
 
 ### Play with the board on the phone (Keyboard link)
 
@@ -130,7 +130,15 @@ but typed letters still arrive; the page's "Last key via" tile shows which path 
 
 ### Board link protocol
 
-The page and the Flipper talk over the Flipper's Bluetooth serial service.
+The page and the Flipper talk over Snake Pad's own Bluetooth service,
+`4b514e43-fc33-4934-b8e7-4a26f71991ee`. None of its characteristics needs encryption, so nothing
+pairs:
+
+| Characteristic | Direction | |
+| --- | --- | --- |
+| `324ba1da-cf74-46e4-8654-b49ad6b8f401` | page → Flipper | frame bytes, written in chunks of at most 20 |
+| `324ba1da-cf74-46e4-8654-b49ad6b8f402` | Flipper → page | button bytes, indicated |
+| `324ba1da-cf74-46e4-8654-b49ad6b8f403` | Flipper → page | flow-control credit, read and notified |
 
 Flipper → page: one byte per button — `0` up, `1` down, `2` left, `3` right, `4` mode.
 
@@ -151,8 +159,12 @@ payload:
                 0 empty · 1 food · 2 hazard · 3 my body · 4 my head · 5 other body · 6 other head
 ```
 
-The page never writes more bytes than the service's flow-control characteristic allows, and waits
-for the Flipper to announce room again when that reaches zero.
+The flow-control characteristic is a big-endian uint32, the 1024 bytes the Flipper will take. The
+page never writes more than that, and once it has spent all of it waits for the Flipper to notify
+the value again, which it does when it has read everything.
+
+The Flipper shows "Connected" from the page's first subscribe or write, because without pairing it
+is not told about the connection itself.
 
 ## Deploy
 
@@ -186,3 +198,6 @@ The deploy fails until the secret is set. To change the token, set it again and 
   hazards as walls and does not know about wrapped boards. It looks five moves ahead where the
   original effectively managed two, so it can choose differently.
 - Boards larger than 50×50 are refused.
+- The Board link is unauthenticated. While Board mode is open, anyone in Bluetooth range can connect
+  to the Flipper instead of your phone. They could read your button presses and draw on the
+  Flipper's screen, and nothing else.
