@@ -264,13 +264,14 @@ async fn a_silent_pad_is_closed_and_moves_stop_waiting() {
     assert!(took < Duration::from_millis(50), "{took:?}");
 }
 
-/// Everything the WiFi board sends: the token, a `[5, n]` heartbeat on a timer and one byte per
-/// press. It reads what the server sends back and keeps only its own heartbeat.
+/// Everything the WiFi board sends: the token, the request for quiet, a `[5, n]` heartbeat on a
+/// timer and one byte per press.
 #[tokio::test]
 async fn heartbeats_alone_keep_a_pad_past_the_idle_limit_and_it_still_steers() {
     let addr = spawn_server(Duration::from_millis(300)).await;
     let (mut board, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
     board.send(Message::text(TOKEN)).await.unwrap();
+    board.send(Message::binary(vec![6u8])).await.unwrap();
     post(&addr, "/start", &game_state("g1", "me", 3)).await;
     // Three idle limits go by with nothing but heartbeats.
     for n in 0..9u8 {
@@ -283,6 +284,27 @@ async fn heartbeats_alone_keep_a_pad_past_the_idle_limit_and_it_still_steers() {
     let (answer, took) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
     assert_eq!(answer, r#"{"move":"right"}"#);
     assert!(took < Duration::from_millis(100), "{took:?}");
+}
+
+#[tokio::test]
+async fn a_pad_that_asks_for_quiet_is_sent_no_state_frames() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut pad = connect_pad(&addr).await;
+    pad.send(Message::binary(vec![6u8])).await.unwrap();
+    // The echo comes back after the server has handled the request sent before it.
+    echo(&mut pad, vec![5, 0]).await;
+
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    pad.send(Message::binary(vec![3u8])).await.unwrap();
+    pad.send(Message::binary(vec![5u8, 1])).await.unwrap();
+    // The start frame went to every other pad; the next frame here is the echo.
+    assert_eq!(next_frame(&mut pad).await, Message::binary(vec![5u8, 1]));
+
+    let (answer, _) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
+    assert_eq!(answer, r#"{"move":"right"}"#);
+    pad.send(Message::binary(vec![5u8, 2])).await.unwrap();
+    // Nor did the turn and moved frames come.
+    assert_eq!(next_frame(&mut pad).await, Message::binary(vec![5u8, 2]));
 }
 
 #[tokio::test]

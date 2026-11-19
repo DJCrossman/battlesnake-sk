@@ -25,8 +25,9 @@ pub(crate) async fn connect(State(app): State<Arc<App>>, ws: WebSocketUpgrade) -
 
 /// Protocol: the first frame is the control token as text. After that the pad sends binary
 /// frames — `[0..=3]` a direction (up, down, left, right), `[4]` the mode button, `[5, ..]` an
-/// echo request — and receives the JSON frames broadcast for the attached snake. A pad that sends
-/// nothing for `pad_idle` is closed.
+/// echo request, `[6]` a request for quiet — and receives the JSON frames broadcast for the
+/// attached snake, unless it asked for quiet: a pad with no screen has no use for them. A pad
+/// that sends nothing for `pad_idle` is closed.
 async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
     let first = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await;
     let authenticated = matches!(
@@ -47,6 +48,7 @@ async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
     let pads = app.pads.fetch_add(1, Ordering::AcqRel) + 1;
     info!(pads, "pad connected");
     let mut last_heard = Instant::now();
+    let mut quiet = false;
     let mut outgoing = Some(Message::Text(
         format!(r#"{{"t":"hello","mode":"{}"}}"#, app.mode().as_str()).into(),
     ));
@@ -64,6 +66,7 @@ async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
                             Some(&b @ 0..=3) => queue_press(&app, Direction::ALL[usize::from(b)]),
                             Some(4) => press_mode_button(&app),
                             Some(5) => outgoing = Some(Message::Binary(bytes)),
+                            Some(6) => quiet = true,
                             _ => {}
                         },
                         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -71,8 +74,8 @@ async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
                     }
                 },
                 event = events.recv() => match event {
-                    Ok(frame) => outgoing = Some(Message::Text(frame)),
-                    Err(RecvError::Lagged(_)) => {}
+                    Ok(frame) if !quiet => outgoing = Some(Message::Text(frame)),
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
                     Err(RecvError::Closed) => break,
                 },
                 _ = tokio::time::sleep_until(last_heard + app.pad_idle) => {
