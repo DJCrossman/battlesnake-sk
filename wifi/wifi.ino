@@ -42,7 +42,8 @@ const char AMAZON_ROOT_CA_1[] =
 WebSocketsClient webSocket;
 String token;
 bool settingsReceived = false;
-uint32_t lastHeardAt = 0;
+uint32_t lastHeartbeatAt = 0;
+uint32_t lastServerFrameAt = 0;
 uint8_t stateSent = BOARD_WAITING;
 uint8_t heartbeatCount = 0;
 
@@ -66,12 +67,14 @@ void setup() {
 
 void loop() {
   // UART first, so a socket call that blocked for a while cannot make the Flipper look gone.
+  bool stopping = false;
   while (Serial.available() > 0) {
     uint8_t command = Serial.read();
-    lastHeardAt = millis();
     if (command <= 4) {
       if (accepted) webSocket.sendBIN(&command, 1);
     } else if (command == 5) {
+      // Only a heartbeat shows the app is there; any other byte could be noise on the header.
+      lastHeartbeatAt = millis();
       stateSent = currentState();
       Serial.write(stateSent);
       if (accepted) {
@@ -79,15 +82,24 @@ void loop() {
         webSocket.sendBIN(echo, 2);
       }
     } else if (command == 6) {
-      // A restart drops WiFi and the socket and returns the board to waiting.
-      if (settingsReceived) ESP.restart();
+      stopping = true;
     } else if (command == 0x10) {
       receiveSettings();
     }
   }
 
-  // A board that stays connected after the app died would keep the server waiting for a player.
-  if (settingsReceived && millis() - lastHeardAt > 6000) ESP.restart();
+  // The app left or died, and a board that stayed connected would keep the server waiting for a
+  // player. Closing the socket tells the server at once; the restart drops WiFi and returns the
+  // board to waiting.
+  if (settingsReceived && (stopping || millis() - lastHeartbeatAt > 6000)) {
+    webSocket.disconnect();
+    delay(100);
+    ESP.restart();
+  }
+
+  // The server echoes every heartbeat, so 6 s without a frame means the connection is dead.
+  // TCP can take minutes to notice that when mobile data drops.
+  if (accepted && millis() - lastServerFrameAt > 6000) webSocket.disconnect();
 
   // The core gives up after some failures, so joins are retried here: a second after a drop,
   // and every 15 s for a join that ended without saying so.
@@ -127,7 +139,6 @@ void receiveSettings() {
   while (count < 4 && millis() - startedAt < 300) {
     int c = Serial.read();
     if (c < 0) continue;
-    lastHeardAt = millis();
     if (c == '\n') {
       count++;
     } else {
@@ -137,6 +148,7 @@ void receiveSettings() {
   if (count < 4 || settingsReceived) return;
 
   settingsReceived = true;
+  lastHeartbeatAt = millis();
   token = lines[3];
 
   // The settings live only until the next restart.
@@ -147,7 +159,11 @@ void receiveSettings() {
   WiFi.setAutoReconnect(false);
   WiFi.onEvent(onWifiEvent);
   wifiRetryAt = millis() + 15000;
-  WiFi.begin(lines[0].c_str(), lines[1].c_str());
+  // A password the radio cannot use at all, such as one under 8 characters, fails here and
+  // raises no event.
+  if (WiFi.begin(lines[0].c_str(), lines[1].c_str()) == WL_CONNECT_FAILED) {
+    wifiState = BOARD_HOTSPOT_REFUSED;
+  }
 
   bool tls = lines[2].startsWith("wss://");
   String hostAndPort = lines[2].substring(tls ? 6 : 5);
@@ -178,9 +194,12 @@ void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
   switch (info.wifi_sta_disconnected.reason) {
     case WIFI_REASON_ASSOC_LEAVE:
       // The core leaves like this just before it joins again, which must not hide why the last
-      // join failed. A hotspot being switched off can say the same, so loop() still retries.
-      if (wifiState == BOARD_ON_WIFI) wifiState = BOARD_JOINING;
-      wifiRetryAt = millis() + 15000;
+      // join failed. A hotspot being switched off can say the same, and only then was the board
+      // on WiFi.
+      if (wifiState == BOARD_ON_WIFI) {
+        wifiState = BOARD_JOINING;
+        wifiRetryAt = millis() + 1000;
+      }
       return;
     case WIFI_REASON_NO_AP_FOUND:
     case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
@@ -214,8 +233,10 @@ void onSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       // The first text after the token is the hello; the rest are game frames, not needed here.
       accepted = true;
       refused = false;
+      lastServerFrameAt = millis();
       break;
     case WStype_BIN:
+      lastServerFrameAt = millis();
       if (length > 0 && payload[0] == 5) Serial.write(BOARD_ECHOED);
       break;
     case WStype_DISCONNECTED:

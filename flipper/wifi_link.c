@@ -184,7 +184,7 @@ static void wifi_link_draw(Canvas* canvas, void* context) {
     canvas_draw_str(canvas, 2, 11, "Snake Pad");
 
     canvas_set_font(canvas, FontSecondary);
-    const char* board = "No WiFi board";
+    const char* board = "Board not answering";
     const char* detail = "";
     char ping[24];
     switch(state->board) {

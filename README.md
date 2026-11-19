@@ -178,7 +178,7 @@ the board is connected and is green after that. The screen says where the connec
 
 | Screen | Meaning |
 | --- | --- |
-| `No WiFi board` | nothing answers on the header: the board is not plugged in or not flashed |
+| `Board not answering` | the board is not plugged in or not flashed. It also shows for a few seconds at a time while the board is tied up reaching a server that does not answer |
 | `No settings file`, `Settings file incomplete` | check `apps_data/snake_pad/wifi.txt` and its four keys |
 | `Joining hotspot` | |
 | `Hotspot not found` | the hotspot is off, out of range or on 5 GHz only |
@@ -214,8 +214,9 @@ The Flipper and the board talk over the UART on the GPIO header at 115200 baud: 
 
 The board sends its state when it changes and in answer to each heartbeat, and is silent
 otherwise. Any other byte from it is the ESP32's boot text, which the Flipper ignores. A board
-that hears nothing from the Flipper for 6 seconds restarts, so a Flipper that goes away cannot
-leave a pad connected and the autopilot takes over again.
+that gets no heartbeat from the Flipper for 6 seconds closes its socket and restarts, so a Flipper
+that goes away cannot leave a pad connected and the autopilot takes over again. A board that gets
+nothing from the server for 6 seconds drops the socket and connects again.
 
 On the WebSocket the board sends the token, the heartbeat and the presses, and throws away the
 board frames the server sends it.
