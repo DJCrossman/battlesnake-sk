@@ -18,6 +18,17 @@ Flipper Zero ◀──Bluetooth──▶ phone browser (/pad) ──WebSocket─
   on the phone: it draws the live board and relays each press to the server as one byte over a
   WebSocket. In Board mode it also mirrors the board to the Flipper.
 
+There is a third link, **WiFi**, that needs no page and no Bluetooth. A Wi-Fi Devboard on the
+Flipper joins the phone's hotspot and holds the WebSocket itself, so the phone is only the path to
+the internet. The Flipper's buttons steer and its screen shows the connection, not the board.
+
+```
+Flipper Zero ──UART──▶ Wi-Fi Devboard ──phone hotspot──▶ server ◀──/move── Battlesnake engine
+ Snake Pad app          wifi/ firmware    WebSocket
+```
+
+- **`wifi/`** – the firmware for the Wi-Fi Devboard. See [Play over WiFi](#play-over-wifi-wifi-link).
+
 ## How a move is decided
 
 When the engine asks for a move, the server answers **the instant you press a direction** (a press
@@ -101,6 +112,113 @@ That installs the app under Apps → Bluetooth → Snake Pad and starts it.
 ```bash
 cc -std=c11 -Wall -Wextra -Werror board_frame.c board_frame_test.c -o /tmp/board_frame_test && /tmp/board_frame_test
 ```
+
+### Play over WiFi (WiFi link)
+
+You need the official
+[Flipper Zero Wi-Fi Devboard](https://developer.flipper.net/flipperzero/doxygen/dev_board.html)
+(ESP32-S2). It plugs into the Flipper's GPIO header and takes its power from it. Its radio is
+2.4 GHz only.
+
+**1. Flash the board, once.** The board ships with the Black Magic debugger firmware, which this
+replaces. Install [arduino-cli](https://arduino.github.io/arduino-cli/) and build:
+
+```bash
+brew install arduino-cli
+```
+
+```bash
+cd wifi && arduino-cli compile
+```
+
+The first build downloads the ESP32 core and the WebSockets library at the versions pinned in
+`wifi/sketch.yaml`, about 5 GB, into `~/Library/Arduino15`.
+
+Connect the board's own USB-C port to the computer, with the board off the Flipper. Put it in
+download mode: hold **BOOT**, press and release **RESET**, then release **BOOT**. Find the port
+that appeared:
+
+```bash
+arduino-cli board list
+```
+
+Then, from `wifi/`, with that port:
+
+```bash
+arduino-cli upload -p /dev/cu.usbmodem01
+```
+
+Press **RESET** when it finishes. Flashing again later needs download mode again. To put Black
+Magic back, run `ufbt devboard_flash` with the board in download mode.
+
+**2. Write the settings file.** With qFlipper's file manager or the Flipper mobile app, create
+`SD Card/apps_data/snake_pad/wifi.txt`:
+
+```
+Hotspot: <the hotspot's name>
+Password: <the hotspot's password>
+Server: wss://<the pad address from the deploy log, without https://>
+Token: <CONTROL_TOKEN>
+```
+
+For a server on your own computer, use `Server: ws://<its address on the hotspot>:8000`. The app
+reads the file each time the board asks for it and the board keeps the settings only in memory, so
+neither the app nor the firmware contains them.
+
+The hotspot's name has to match exactly. An iPhone's default name has a curly apostrophe
+(`David’s iPhone`), which is easy to get wrong; renaming the phone in Settings → General → About
+avoids it.
+
+**3. Turn the hotspot on, on 2.4 GHz.** On an iPhone that is Settings → Personal Hotspot →
+Maximize Compatibility. If the Flipper says the hotspot is not found, keep that settings screen
+open while the board joins. On Android, choose the 2.4 GHz band in the hotspot's settings.
+
+**4. Plug the board into the Flipper, start Snake Pad and choose WiFi.** The LED blinks blue until
+the board is connected and is green after that. The screen says where the connection stands:
+
+| Screen | Meaning |
+| --- | --- |
+| `No WiFi board` | nothing answers on the header: the board is not plugged in or not flashed |
+| `No settings file`, `Settings file incomplete` | check `apps_data/snake_pad/wifi.txt` and its four keys |
+| `Joining hotspot` | |
+| `Hotspot not found` | the hotspot is off, out of range or on 5 GHz only |
+| `Hotspot refused password` | |
+| `Reaching server` | on the hotspot, but the server has not answered: wrong address, no mobile data or the server is down |
+| `Server refused token` | |
+| `Connected` | with the ping: the round trip Flipper → server → Flipper, measured every 2 s |
+
+Start a game and steer. Holding Back exits and tells the board to drop the hotspot.
+
+### WiFi link protocol
+
+The Flipper and the board talk over the UART on the GPIO header at 115200 baud: Flipper pin 13
+(TX) to the ESP32-S2's GPIO44, and GPIO43 to Flipper pin 14 (RX).
+
+| Flipper → board | |
+| --- | --- |
+| `0`–`4` | a press: up, down, left, right, mode. The board sends it on as a one-byte WebSocket frame |
+| `5` | heartbeat, every 2 s. The board answers with its state and, when connected, sends the server `[5, n]` |
+| `6` | stop: the app is leaving, so the board restarts and waits for settings |
+| `0x10` | settings, followed by four lines: hotspot, password, server, token. Sent when the board says it is waiting |
+
+| Board → Flipper | |
+| --- | --- |
+| `0xA0` | waiting for settings |
+| `0xA1` | joining the hotspot |
+| `0xA2` | hotspot not found |
+| `0xA3` | hotspot refused the password |
+| `0xA4` | on WiFi, reaching the server |
+| `0xA5` | the server refused the token |
+| `0xA6` | connected: the server answered the token |
+| `0xA7` | the server answered the last heartbeat |
+
+The board sends its state when it changes and in answer to each heartbeat, and is silent
+otherwise. Any other byte from it is the ESP32's boot text, which the Flipper ignores. A board
+that hears nothing from the Flipper for 6 seconds restarts, so a Flipper that goes away cannot
+leave a pad connected and the autopilot takes over again.
+
+On the WebSocket the board sends the token, the heartbeat and the presses, and throws away the
+board frames the server sends it.
 
 ### Play with the board on the Flipper (Board link)
 
@@ -198,6 +316,11 @@ The deploy fails until the secret is set. To change the token, set it again and 
   hazards as walls and does not know about wrapped boards. It looks five moves ahead where the
   original effectively managed two, so it can choose differently.
 - Boards larger than 50×50 are refused.
+- The WiFi link trusts one certificate authority for `wss://`, Amazon Root CA 1, which is what
+  CloudFront uses. A server behind another authority needs its root added in `wifi/wifi.ino`.
+- The WiFi board drops its socket and reconnects if the server sends it a frame over 15 kB. A turn
+  of a four-snake 11×11 game is about 2 kB.
+- `wifi.txt` holds the hotspot password and the pad token as plain text on the Flipper's SD card.
 - The Board link is unauthenticated. While Board mode is open, anyone in Bluetooth range can connect
   to the Flipper instead of your phone. They could read your button presses and draw on the
   Flipper's screen, and nothing else.
