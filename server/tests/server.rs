@@ -264,6 +264,27 @@ async fn a_silent_pad_is_closed_and_moves_stop_waiting() {
     assert!(took < Duration::from_millis(50), "{took:?}");
 }
 
+/// Everything the WiFi board sends: the token, a `[5, n]` heartbeat on a timer and one byte per
+/// press. It reads what the server sends back and keeps only its own heartbeat.
+#[tokio::test]
+async fn heartbeats_alone_keep_a_pad_past_the_idle_limit_and_it_still_steers() {
+    let addr = spawn_server(Duration::from_millis(300)).await;
+    let (mut board, _) = connect_async(format!("ws://{addr}/ws")).await.unwrap();
+    board.send(Message::text(TOKEN)).await.unwrap();
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    // Three idle limits go by with nothing but heartbeats.
+    for n in 0..9u8 {
+        echo(&mut board, vec![5, n]).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    board.send(Message::binary(vec![3u8])).await.unwrap();
+    echo(&mut board, vec![5, 9]).await;
+
+    let (answer, took) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
+    assert_eq!(answer, r#"{"move":"right"}"#);
+    assert!(took < Duration::from_millis(100), "{took:?}");
+}
+
 #[tokio::test]
 async fn oversized_pad_frames_close_the_socket() {
     let addr = spawn_server(PAD_IDLE).await;
