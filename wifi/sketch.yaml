@@ -1,0 +1,12 @@
+profiles:
+  devboard:
+    notes: Flipper Zero Wi-Fi Devboard (ESP32-S2-WROVER, 4 MB flash)
+    # Huge APP: a WiFi plus TLS sketch comes close to the default 1.25 MB app slot, and the
+    # board never updates itself over the air, so it needs no second slot.
+    fqbn: esp32:esp32:esp32s2:PartitionScheme=huge_app
+    platforms:
+      - platform: esp32:esp32 (3.3.13)
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+    libraries:
+      - WebSockets (2.7.2)
+default_profile: devboard
