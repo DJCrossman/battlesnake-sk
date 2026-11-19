@@ -225,12 +225,18 @@ void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
 // Runs inside webSocket.loop(), so it may write to the UART.
 void onSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   switch (type) {
-    case WStype_CONNECTED:
+    case WStype_CONNECTED: {
       webSocket.sendTXT(token);
       tokenSent = true;
+      // The board has no screen for the game, so it asks the server not to send it. A server
+      // from before that request ignores it, and the frames are thrown away below instead.
+      uint8_t quiet = 6;
+      webSocket.sendBIN(&quiet, 1);
       break;
+    }
     case WStype_TEXT:
-      // The first text after the token is the hello; the rest are game frames, not needed here.
+      // The first text after the token is the hello. Any later text is a game frame from a server
+      // that does not know the request for quiet, and is not needed here.
       accepted = true;
       refused = false;
       lastServerFrameAt = millis();

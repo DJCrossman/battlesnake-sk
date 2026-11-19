@@ -218,8 +218,10 @@ that gets no heartbeat from the Flipper for 6 seconds closes its socket and rest
 that goes away cannot leave a pad connected and the autopilot takes over again. A board that gets
 nothing from the server for 6 seconds drops the socket and connects again.
 
-On the WebSocket the board sends the token, the heartbeat and the presses, and throws away the
-board frames the server sends it.
+On the WebSocket the board sends the token, then `[6]` to ask the server not to send it the board
+frames, then the heartbeats and the presses. A server from before that request ignores it; the
+board then reads the frames and throws them away, and drops its socket if one is over 15 kB (a
+turn of a four-snake 11×11 game is about 2 kB).
 
 ### Play with the board on the Flipper (Board link)
 
@@ -319,8 +321,6 @@ The deploy fails until the secret is set. To change the token, set it again and 
 - Boards larger than 50×50 are refused.
 - The WiFi link trusts one certificate authority for `wss://`, Amazon Root CA 1, which is what
   CloudFront uses. A server behind another authority needs its root added in `wifi/wifi.ino`.
-- The WiFi board drops its socket and reconnects if the server sends it a frame over 15 kB. A turn
-  of a four-snake 11×11 game is about 2 kB.
 - `wifi.txt` holds the hotspot password and the pad token as plain text on the Flipper's SD card.
 - The Board link is unauthenticated. While Board mode is open, anyone in Bluetooth range can connect
   to the Flipper instead of your phone. They could read your button presses and draw on the
