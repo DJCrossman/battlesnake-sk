@@ -5,6 +5,7 @@
 #include "links.h"
 
 typedef enum {
+    SnakePadLinkWifi,
     SnakePadLinkBoard,
     SnakePadLinkKeyboard,
     SnakePadLinkCount,
@@ -17,7 +18,7 @@ int32_t snake_pad_app(void* p) {
     UNUSED(p);
 
     // Link chooser: Up/Down to pick, OK to start, Back to leave the app
-    SnakePadLink selected = SnakePadLinkBoard;
+    SnakePadLink selected = SnakePadLinkWifi;
     FuriMessageQueue* queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     ViewPort* view_port = view_port_alloc();
     view_port_draw_callback_set(view_port, snake_pad_draw_chooser, &selected);
@@ -32,7 +33,8 @@ int32_t snake_pad_app(void* p) {
         furi_check(furi_message_queue_get(queue, &input, FuriWaitForever) == FuriStatusOk);
         if(input.type != InputTypeShort && input.type != InputTypeRepeat) continue;
         if(input.key == InputKeyUp || input.key == InputKeyDown) {
-            selected = (selected + 1) % SnakePadLinkCount;
+            selected = (selected + (input.key == InputKeyDown ? 1 : SnakePadLinkCount - 1)) %
+                       SnakePadLinkCount;
             view_port_update(view_port);
         } else {
             chosen = input.key == InputKeyOk;
@@ -45,7 +47,9 @@ int32_t snake_pad_app(void* p) {
     furi_record_close(RECORD_GUI);
     furi_message_queue_free(queue);
 
-    if(chosen && selected == SnakePadLinkBoard) {
+    if(chosen && selected == SnakePadLinkWifi) {
+        wifi_link_run();
+    } else if(chosen && selected == SnakePadLinkBoard) {
         board_link_run();
     } else if(chosen) {
         keyboard_link_run();
@@ -55,19 +59,19 @@ int32_t snake_pad_app(void* p) {
 
 static void snake_pad_draw_chooser(Canvas* canvas, void* context) {
     const SnakePadLink* selected = context;
-    static const char* const names[SnakePadLinkCount] = {"Board", "Keyboard"};
-    static const char* const needs[SnakePadLinkCount] = {"Chrome on Android", "any phone"};
+    static const char* const names[SnakePadLinkCount] = {"WiFi", "Board", "Keyboard"};
+    static const char* const needs[SnakePadLinkCount] = {
+        "WiFi Devboard + hotspot", "Chrome on Android", "any phone"};
 
+    // Three rows leave no room for the title
     canvas_clear(canvas);
-    canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 11, "Snake Pad");
     for(SnakePadLink link = 0; link < SnakePadLinkCount; link++) {
-        const uint8_t top = 14 + link * 25;
-        if(link == *selected) canvas_draw_rframe(canvas, 0, top, 128, 23, 3);
+        const uint8_t top = link * 21;
+        if(link == *selected) canvas_draw_rframe(canvas, 0, top, 128, 21, 3);
         canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str(canvas, 5, top + 10, names[link]);
+        canvas_draw_str(canvas, 5, top + 9, names[link]);
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 5, top + 19, needs[link]);
+        canvas_draw_str(canvas, 5, top + 18, needs[link]);
     }
 }
 
