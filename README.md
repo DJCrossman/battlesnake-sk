@@ -289,10 +289,11 @@ is not told about the connection itself.
 
 ## Deploy
 
-Pushing to `main` deploys to AWS (ECS, via SST) from `.github/workflows/deploy.yml`; the image is
-built from `Dockerfile`. The deploy log ends with two addresses:
+Pushing to `main` deploys to AWS (one EC2 instance, via SST) from `.github/workflows/deploy.yml`;
+the arm64 image is built from `Dockerfile` and pushed to ECR by the deploy itself. The deploy log
+ends with two addresses:
 
-- `engine` – the load balancer, `http://….elb.amazonaws.com`. Register this one with Battlesnake;
+- `engine` – the instance's fixed IP, `http://<elastic ip>`. Register this one with Battlesnake;
   the engine calls it directly.
 - `pad` – CloudFront, `https://….cloudfront.net`. Open `/pad#<token>` on this one. HTTPS is what
   lets the page use Web Bluetooth and keep the phone's screen awake.
@@ -306,10 +307,13 @@ AWS_REGION=us-west-2 npx sst secret set ControlToken <token> --stage prod
 
 The deploy fails until the secret is set. To change the token, set it again and redeploy.
 
-- The server keeps the game and pad state in memory, so it must run as exactly one task.
-- CloudFront caches nothing and forwards every request to the load balancer over plain HTTP, so
-  that last hop inside AWS is not encrypted.
-- The token is readable in the ECS task definition by anyone with access to the AWS account.
+- The server keeps the game and pad state in memory, so it runs as exactly one container on one
+  instance.
+- A deploy that changes the server or the token replaces the instance, so the snake is offline for
+  a minute or two and any game in progress is lost. The IP stays the same.
+- CloudFront caches nothing and forwards every request to the instance over plain HTTP, so that
+  last hop is not encrypted.
+- The token is readable in the instance's user data by anyone with access to the AWS account.
 - `/start`, `/move` and `/end` are open, as the Battlesnake API requires. Someone who knows the URL
   can start a game against the snake, and the pad follows the most recently started game.
 
