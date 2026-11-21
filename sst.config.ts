@@ -21,6 +21,8 @@ export default $config({
     const controlToken = new sst.Secret("ControlToken");
 
     const repository = new aws.ecr.Repository("BattlesnakeRepository", {
+      // ECR names must be lowercase, which the generated one is not.
+      name: `${$app.name}-${$app.stage}`,
       // Lets a removed stage take its images with it.
       forceDelete: true,
     });
