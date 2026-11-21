@@ -2,18 +2,24 @@
 /* tslint:disable */
 /* eslint-disable */
 /* deno-fmt-ignore-file */
-import "sst"
-export {}
+/* biome-ignore-all lint: auto-generated */
+
 declare module "sst" {
   export interface Resource {
-    "MyService": {
-      "service": string
-      "type": "sst.aws.Service"
+    "BattlesnakeRouter": {
+      "type": "sst.aws.Router"
       "url": string
     }
-    "MyVpc": {
-      "bastion": string
+    "BattlesnakeVPC": {
       "type": "sst.aws.Vpc"
+    }
+    "ControlToken": {
+      "type": "sst.sst.Secret"
+      "value": string
     }
   }
 }
+/// <reference path="sst-env.d.ts" />
+
+import "sst"
+export {}
