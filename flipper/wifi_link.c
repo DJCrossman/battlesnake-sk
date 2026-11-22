@@ -8,8 +8,6 @@
 #include <notification/notification_messages.h>
 #include <storage/storage.h>
 
-#include "links.h"
-
 // What the Flipper sends the WiFi Devboard over the header UART
 typedef enum {
     WifiLinkCommandHeartbeat = 5,
@@ -45,7 +43,7 @@ typedef struct {
     };
 } WifiLinkEvent;
 
-// Same table as the Board link, so the server reads the same bytes from either
+// The press bytes the server reads, the same ones the pad page sends
 static const uint8_t wifi_link_button_byte[InputKeyMAX] = {
     [InputKeyUp] = 0,
     [InputKeyDown] = 1,
@@ -81,7 +79,11 @@ static bool wifi_link_read_hotspot(
     FuriString* hotspot,
     FuriString* password);
 
-void wifi_link_run(void) {
+// A WiFi Devboard on the GPIO header holds the connection to the game server, and the Flipper
+// sends it the settings from the SD card and the button bytes. Needs a hotspot. Runs until the
+// player holds Back.
+int32_t snake_pad_app(void* p) {
+    UNUSED(p);
     WifiLinkState state = {
         .mutex = furi_mutex_alloc(FuriMutexTypeNormal),
         .hotspot = furi_string_alloc(),
@@ -196,6 +198,7 @@ void wifi_link_run(void) {
     furi_message_queue_free(queue);
     furi_string_free(state.hotspot);
     furi_mutex_free(state.mutex);
+    return 0;
 }
 
 static void wifi_link_draw(Canvas* canvas, void* context) {
