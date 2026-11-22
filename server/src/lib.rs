@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
 use axum::extract::ws::Utf8Bytes;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::{Html, IntoResponse, Response};
@@ -75,6 +75,10 @@ pub fn router(config: Config) -> Router {
             get(|| async { Html(include_str!("../static/pad.html")) }),
         )
         .route("/ws", get(pad::connect))
+        // Only the engine's unauthenticated POSTs read a body, and the autopilot's cost grows with
+        // its length. The largest 19x19 game the engine can send (8 snakes filling the board, food
+        // on every cell, hazards stacked 8 deep on every cell) is about 92 KB; this is 5.7x that.
+        .layer(DefaultBodyLimit::max(512 * 1024))
         .with_state(app)
 }
 

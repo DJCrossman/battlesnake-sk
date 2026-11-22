@@ -162,6 +162,43 @@ async fn oversized_boards_are_refused_and_the_server_keeps_answering() {
 }
 
 #[tokio::test]
+async fn bodies_past_512_kib_are_refused_and_a_crowded_19x19_game_still_gets_a_move() {
+    let addr = spawn_server(PAD_IDLE).await;
+    // Food on every cell of a 19x19 board and hazards stacked eight deep on each, as deep as the
+    // Sinkholes map stacks its centre: more than any real game sends.
+    let cells: Vec<String> = (0..19)
+        .flat_map(|y| (0..19).map(move |x| format!(r#"{{"x":{x},"y":{y}}}"#)))
+        .collect();
+    let crowded = game_state("g1", "me", 3).replace(
+        r#""height": 11, "width": 11, "food": [], "hazards": []"#,
+        &format!(
+            r#""height": 19, "width": 19, "food": [{}], "hazards": [{}]"#,
+            cells.join(","),
+            vec![cells.join(","); 8].join(",")
+        ),
+    );
+    let (answer, _) = post(&addr, "/move", &crowded).await;
+    assert!(answer.starts_with(r#"{"move":""#), "{answer}");
+
+    // Trailing spaces keep the JSON valid: exactly 512 KiB is answered, one byte more is refused.
+    // Only one byte over, the server has read the whole body by the time it refuses, so it does
+    // not hang up while the client is still sending.
+    let mut padded = game_state("g1", "me", 3);
+    padded.extend(std::iter::repeat_n(' ', 512 * 1024 - padded.len()));
+    let (answer, _) = post(&addr, "/move", &padded).await;
+    assert!(answer.starts_with(r#"{"move":""#), "{answer}");
+    padded.push(' ');
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/move"))
+        .header("content-type", "application/json")
+        .body(padded)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 413);
+}
+
+#[tokio::test]
 async fn presses_made_in_auto_are_not_replayed() {
     let addr = spawn_server(PAD_IDLE).await;
     let mut pad = connect_pad(&addr).await;
