@@ -49,6 +49,9 @@ pub struct InputQueue {
     inputs: VecDeque<Direction>,
 }
 
+/// 20x the engine's 500 ms default: no real game is clipped, and a forged one counts as 10 s.
+const TIMEOUT_CAP_MS: f64 = 10_000.0;
+
 /// The engine-side cost of a move that we do not see: network, TLS, the engine itself.
 #[derive(Debug, Clone, Copy)]
 pub struct Overhead {
@@ -113,6 +116,7 @@ impl Control {
         });
         self.queue.clear();
         self.last_spent_ms = None;
+        self.overhead = Overhead::default();
     }
 
     /// Releases the pad if `state`'s snake holds it; returns whether it did.
@@ -182,9 +186,10 @@ pub fn move_at_deadline(state: &GameState, mode: Mode) -> Option<Direction> {
 impl Overhead {
     /// Learns from one turn: the engine measured `latency_ms` for our previous answer, of which
     /// we spent `spent_ms` ourselves. A higher sample is taken at once, a lower one slowly, and a
-    /// timeout (latency at or past the game's timeout) adds 100 ms on top.
+    /// timeout (latency at or past the game's timeout, capped at 10 s) adds 100 ms on top, so a
+    /// sample is never more than 10 s.
     pub fn observe(&mut self, latency_ms: f64, spent_ms: f64, timeout_ms: f64) {
-        if latency_ms >= timeout_ms {
+        if latency_ms >= timeout_ms.min(TIMEOUT_CAP_MS) {
             self.ms += 100.0;
             return;
         }
@@ -196,10 +201,12 @@ impl Overhead {
         };
     }
 
-    /// How long the server may wait for the player: the game's timeout minus the overhead and a
-    /// 50 ms safety margin.
+    /// How long the server may wait for the player: the game's timeout (capped at 10 s) minus the
+    /// overhead and a 50 ms safety margin.
     pub fn hold(self, timeout_ms: u32) -> Duration {
-        Duration::from_secs_f64((f64::from(timeout_ms) - self.ms - 50.0).max(0.0) / 1000.0)
+        Duration::from_secs_f64(
+            (f64::from(timeout_ms).min(TIMEOUT_CAP_MS) - self.ms - 50.0).max(0.0) / 1000.0,
+        )
     }
 }
 
@@ -249,6 +256,14 @@ mod tests {
         assert!(control.is_attached(&state));
         assert!(control.queue.inputs.is_empty());
         assert_eq!(control.last_spent_ms, None);
+    }
+
+    #[test]
+    fn attaching_forgets_the_last_game_s_overhead() {
+        let mut control = Control::default();
+        control.overhead.observe(400.0, 0.0, 500.0);
+        control.attach(&bottom_row());
+        assert_eq!(control.overhead.ms, 100.0);
     }
 
     #[test]
@@ -384,5 +399,16 @@ mod tests {
             overhead.observe(500.0, 0.0, 500.0);
         }
         assert_eq!(overhead.hold(500), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_forged_timeout_counts_as_10_s_at_most() {
+        let mut overhead = Overhead::default();
+        assert_eq!(overhead.hold(u32::MAX), Duration::from_millis(9_850));
+        // A latency just under a u32::MAX timeout is past the cap, so it is one more timeout.
+        overhead.observe(4_294_967_294.0, 0.0, 4_294_967_295.0);
+        assert_eq!(overhead.ms, 200.0);
+        overhead.observe(9_999.0, 0.0, 4_294_967_295.0);
+        assert_eq!(overhead.ms, 9_999.0);
     }
 }
