@@ -58,6 +58,7 @@ typedef struct {
     FuriMutex* mutex;
     WifiLinkBoardByte board;
     const char* settings_problem;
+    FuriString* hotspot; // the one the board was last sent, so the screen can say which
     bool pinged;
     uint32_t ping_ms;
     uint32_t presses_sent;
@@ -70,10 +71,21 @@ static void wifi_link_forward_board_byte(
     FuriHalSerialRxEvent event,
     void* context);
 static void wifi_link_forward_tick(void* context);
-static const char* wifi_link_answer_settings_request(FuriHalSerialHandle* serial);
+static const char* wifi_link_answer_settings_request(
+    FuriHalSerialHandle* serial,
+    uint32_t* hotspot_index,
+    FuriString* hotspot);
+static bool wifi_link_read_hotspot(
+    FlipperFormat* file,
+    uint32_t index,
+    FuriString* hotspot,
+    FuriString* password);
 
 void wifi_link_run(void) {
-    WifiLinkState state = {.mutex = furi_mutex_alloc(FuriMutexTypeNormal)};
+    WifiLinkState state = {
+        .mutex = furi_mutex_alloc(FuriMutexTypeNormal),
+        .hotspot = furi_string_alloc(),
+    };
     FuriMessageQueue* queue = furi_message_queue_alloc(16, sizeof(WifiLinkEvent));
 
     ViewPort* view_port = view_port_alloc();
@@ -104,6 +116,7 @@ void wifi_link_run(void) {
 
     uint32_t unanswered_heartbeats = 0;
     uint32_t heartbeat_sent_at = 0;
+    uint32_t hotspot_index = 0;
     WifiLinkEvent event;
     bool running = true;
     while(running) {
@@ -122,9 +135,18 @@ void wifi_link_run(void) {
                 state.pinged = true;
             } else {
                 unanswered_heartbeats = 0;
+                // The next hotspot in the file gets its turn. The board answers every heartbeat
+                // with its state, so only the first "not found" of a try counts. Stop makes the
+                // board start over and ask for the settings again.
+                if(event.board_byte == WifiLinkBoardHotspotNotFound &&
+                   state.board != WifiLinkBoardHotspotNotFound) {
+                    hotspot_index++;
+                    furi_hal_serial_tx(serial, (const uint8_t[]){WifiLinkCommandStop}, 1);
+                }
                 state.board = event.board_byte;
                 if(state.board == WifiLinkBoardWaiting) {
-                    state.settings_problem = wifi_link_answer_settings_request(serial);
+                    state.settings_problem =
+                        wifi_link_answer_settings_request(serial, &hotspot_index, state.hotspot);
                 }
             }
         } else if(event.input.key == InputKeyBack) {
@@ -172,6 +194,7 @@ void wifi_link_run(void) {
     view_port_free(view_port);
     furi_record_close(RECORD_GUI);
     furi_message_queue_free(queue);
+    furi_string_free(state.hotspot);
     furi_mutex_free(state.mutex);
 }
 
@@ -195,14 +218,15 @@ static void wifi_link_draw(Canvas* canvas, void* context) {
         break;
     case WifiLinkBoardJoining:
         board = "Joining hotspot";
+        detail = furi_string_get_cstr(state->hotspot);
         break;
     case WifiLinkBoardHotspotNotFound:
         board = "Hotspot not found";
-        // The ESP32-S2 has no 5 GHz radio, so a 5 GHz-only hotspot never shows up
-        detail = "Needs 2.4 GHz";
+        detail = furi_string_get_cstr(state->hotspot);
         break;
     case WifiLinkBoardHotspotRefused:
         board = "Hotspot refused password";
+        detail = furi_string_get_cstr(state->hotspot);
         break;
     case WifiLinkBoardReachingServer:
         board = "Reaching server";
@@ -256,9 +280,14 @@ static void wifi_link_forward_tick(void* context) {
     furi_message_queue_put(context, &(WifiLinkEvent){.type = WifiLinkEventTick}, 0);
 }
 
-// Reads the settings from the SD card each time the board asks, so the hotspot password and
-// pad token never live in the app. Returns what is wrong with the file, or NULL once sent.
-static const char* wifi_link_answer_settings_request(FuriHalSerialHandle* serial) {
+// Reads the settings from the SD card each time the board asks, so the hotspot passwords and
+// pad token never live in the app. The board is sent the hotspot at *hotspot_index, or the first
+// one once the index has gone past the last, and its name is left in hotspot. Returns what is
+// wrong with the file, or NULL once sent.
+static const char* wifi_link_answer_settings_request(
+    FuriHalSerialHandle* serial,
+    uint32_t* hotspot_index,
+    FuriString* hotspot) {
     Storage* storage = furi_record_open(RECORD_STORAGE);
     FlipperFormat* file = flipper_format_file_alloc(storage);
     FuriString* settings = furi_string_alloc();
@@ -269,10 +298,22 @@ static const char* wifi_link_answer_settings_request(FuriHalSerialHandle* serial
     if(!flipper_format_file_open_existing(file, APP_DATA_PATH("wifi.txt"))) {
         problem = "No settings file";
     } else {
-        // In the order the board reads them. Rewind before each, so the file may list them in
-        // any order. flipper_format already drops the \r of a CRLF file and keeps spaces inside
-        // a value, which a password may have.
-        static const char* const keys[] = {"Hotspot", "Password", "Server", "Token"};
+        if(!wifi_link_read_hotspot(file, *hotspot_index, hotspot, value)) {
+            *hotspot_index = 0;
+            if(!wifi_link_read_hotspot(file, 0, hotspot, value)) {
+                problem = "Settings file incomplete";
+            }
+        }
+        if(!problem) {
+            // In the order the board reads them
+            furi_string_cat(settings, hotspot);
+            furi_string_push_back(settings, '\n');
+            furi_string_cat(settings, value);
+            furi_string_push_back(settings, '\n');
+        }
+        // Rewind before each, so the file may list them anywhere. flipper_format already drops
+        // the \r of a CRLF file and keeps spaces inside a value, which a password may have.
+        static const char* const keys[] = {"Server", "Token"};
         for(size_t i = 0; i < COUNT_OF(keys) && !problem; i++) {
             if(flipper_format_rewind(file) && flipper_format_read_string(file, keys[i], value)) {
                 furi_string_cat(settings, value);
@@ -293,4 +334,21 @@ static const char* wifi_link_answer_settings_request(FuriHalSerialHandle* serial
     flipper_format_free(file);
     furi_record_close(RECORD_STORAGE);
     return problem;
+}
+
+// The file lists one Hotspot line and its Password line per network, in the order they are
+// tried. Each read carries on from the one before, so the pair at index is that many pairs in.
+static bool wifi_link_read_hotspot(
+    FlipperFormat* file,
+    uint32_t index,
+    FuriString* hotspot,
+    FuriString* password) {
+    if(!flipper_format_rewind(file)) return false;
+    for(uint32_t i = 0; i <= index; i++) {
+        if(!flipper_format_read_string(file, "Hotspot", hotspot) ||
+           !flipper_format_read_string(file, "Password", password)) {
+            return false;
+        }
+    }
+    return true;
 }

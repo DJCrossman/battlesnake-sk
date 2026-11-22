@@ -165,6 +165,11 @@ Server: wss://<the pad address from the deploy log, without https://>
 Token: <CONTROL_TOKEN>
 ```
 
+For more than one network, such as home and work, list a `Hotspot` line and its `Password` line
+for each, each password right after its hotspot. The app tries them in the order listed, moving
+to the next whenever the board reports the current one not found and back to the first after the
+last, so a network further down the list takes about 8 seconds longer per network above it.
+
 For a server on your own computer, use `Server: ws://<its address on the hotspot>:8000`. The app
 reads the file each time the board asks for it and the board keeps the settings only in memory, so
 neither the app nor the firmware contains them.
@@ -184,9 +189,9 @@ the board is connected and is green after that. The screen says where the connec
 | --- | --- |
 | `Board not answering` | the board is not plugged in or not flashed. It also shows for a few seconds at a time while the board is tied up reaching a server that does not answer |
 | `No settings file`, `Settings file incomplete` | check `apps_data/snake_pad/wifi.txt` and its four keys |
-| `Joining hotspot` | |
-| `Hotspot not found` | the hotspot is off, out of range or on 5 GHz only |
-| `Hotspot refused password` | |
+| `Joining hotspot` | the line below names it |
+| `Hotspot not found` | the hotspot named below is off, out of range or on 5 GHz only; the next one in the file gets its turn |
+| `Hotspot refused password` | for the hotspot named below |
 | `Reaching server` | on the hotspot, but the server has not answered: wrong address, no mobile data or the server is down |
 | `Server refused token` | |
 | `Connected` | with the ping: the round trip Flipper → server → Flipper, measured every 2 s |
