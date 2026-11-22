@@ -12,9 +12,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 use tracing::info;
 
-use crate::App;
 use crate::control::Mode;
 use crate::game::Direction;
+use crate::{App, PadEvent};
 
 pub(crate) async fn connect(State(app): State<Arc<App>>, ws: WebSocketUpgrade) -> Response {
     // The pad's frames are a token or a few bytes; nothing larger is read, even before the token.
@@ -25,9 +25,12 @@ pub(crate) async fn connect(State(app): State<Arc<App>>, ws: WebSocketUpgrade) -
 
 /// Protocol: the first frame is the control token as text. After that the pad sends binary
 /// frames — `[0..=3]` a direction (up, down, left, right), `[4]` the mode button, `[5, ..]` an
-/// echo request, `[6]` a request for quiet — and receives the JSON frames broadcast for the
-/// attached snake, unless it asked for quiet: a pad with no screen has no use for them. A pad
-/// that sends nothing for `pad_idle` is closed.
+/// echo request, `[6]` a request for quiet, `[7]` a request for the Flipper's frames — and
+/// receives the JSON frames broadcast for the attached snake, unless it asked for quiet: a pad
+/// with no screen has no use for them. A pad that asks for the Flipper's frames is answered with
+/// the mode byte (0xB1 + the mode) and from then on receives each event as the Flipper's binary
+/// frame instead of the JSON, or nothing for an event the Flipper does not draw. A pad that sends
+/// nothing for `pad_idle` is closed.
 async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
     let first = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await;
     let authenticated = matches!(
@@ -49,6 +52,7 @@ async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
     info!(pads, "pad connected");
     let mut last_heard = Instant::now();
     let mut quiet = false;
+    let mut flipper = false;
     let mut outgoing = Some(Message::Text(
         format!(r#"{{"t":"hello","mode":"{}"}}"#, app.mode().as_str()).into(),
     ));
@@ -67,6 +71,12 @@ async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
                             Some(4) => press_mode_button(&app),
                             Some(5) => outgoing = Some(Message::Binary(bytes)),
                             Some(6) => quiet = true,
+                            Some(7) => {
+                                flipper = true;
+                                outgoing = Some(Message::Binary(
+                                    vec![0xB1 + u8::from(app.mode())].into(),
+                                ));
+                            }
                             _ => {}
                         },
                         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -74,7 +84,8 @@ async fn serve_pad(app: Arc<App>, mut socket: WebSocket) {
                     }
                 },
                 event = events.recv() => match event {
-                    Ok(frame) if !quiet => outgoing = Some(Message::Text(frame)),
+                    Ok(event) if flipper => outgoing = event.flipper.map(Message::Binary),
+                    Ok(event) if !quiet => outgoing = Some(Message::Text(event.json)),
                     Ok(_) | Err(RecvError::Lagged(_)) => {}
                     Err(RecvError::Closed) => break,
                 },
@@ -114,8 +125,9 @@ fn press_mode_button(app: &App) {
         Mode::from(previous).next()
     };
     info!(mode = mode.as_str(), "mode changed");
-    let _ = app
-        .events
-        .send(format!(r#"{{"t":"mode","mode":"{}"}}"#, mode.as_str()).into());
+    let _ = app.events.send(PadEvent {
+        json: format!(r#"{{"t":"mode","mode":"{}"}}"#, mode.as_str()).into(),
+        flipper: Some(vec![0xB1 + u8::from(mode)].into()),
+    });
     app.wake.notify_waiters();
 }

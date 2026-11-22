@@ -2,6 +2,7 @@
 
 pub mod autopilot;
 pub mod control;
+mod flipper;
 pub mod game;
 mod pad;
 
@@ -21,6 +22,7 @@ use tokio::sync::{Notify, broadcast};
 use tracing::info;
 
 use control::{Control, Mode, Source};
+use flipper::{Moment, board_frame};
 use game::{Direction, GameState};
 
 pub struct Config {
@@ -30,6 +32,15 @@ pub struct Config {
     /// A pad socket that receives nothing for this long is closed. The page sends an echo
     /// request every 2 s, so silence means the phone went away without closing the connection.
     pub pad_idle: Duration,
+}
+
+/// One broadcast event in each form a pad can ask for.
+#[derive(Clone)]
+struct PadEvent {
+    /// For the pad page.
+    json: Utf8Bytes,
+    /// For the Flipper, see `flipper`; `None` when it has nothing to draw for this event.
+    flipper: Option<Bytes>,
 }
 
 struct App {
@@ -43,8 +54,8 @@ struct App {
     /// Wakes a `/move` waiting for the player: a press, a mode change, a pad leaving or a newer
     /// `/move` for the same snake.
     wake: Notify,
-    /// JSON frames for every pad. Slow sockets lag and drop frames rather than hold anyone up.
-    events: broadcast::Sender<Utf8Bytes>,
+    /// Frames for every pad. Slow sockets lag and drop frames rather than hold anyone up.
+    events: broadcast::Sender<PadEvent>,
 }
 
 pub fn router(config: Config) -> Router {
@@ -97,13 +108,14 @@ async fn start_game(State(app): State<Arc<App>>, body: Bytes) -> StatusCode {
     app.control.lock().unwrap().attach(&state);
     info!(game = %state.game.id, snake = %state.you.id, timeout_ms = state.game.timeout, "game started");
     if app.is_watched() {
-        let _ = app.events.send(
-            format!(
+        let _ = app.events.send(PadEvent {
+            json: format!(
                 r#"{{"t":"start","state":{}}}"#,
                 String::from_utf8_lossy(&body)
             )
             .into(),
-        );
+            flipper: Some(board_frame(&state, Moment::Start)),
+        });
     }
     StatusCode::OK
 }
@@ -157,13 +169,14 @@ async fn end_game(State(app): State<Arc<App>>, body: Bytes) -> StatusCode {
     let was_attached = app.control.lock().unwrap().detach(&state);
     info!(game = %state.game.id, snake = %state.you.id, attached = was_attached, turn = state.turn, "game ended");
     if was_attached && app.is_watched() {
-        let _ = app.events.send(
-            format!(
+        let _ = app.events.send(PadEvent {
+            json: format!(
                 r#"{{"t":"end","state":{}}}"#,
                 String::from_utf8_lossy(&body)
             )
             .into(),
-        );
+            flipper: Some(board_frame(&state, Moment::End)),
+        });
     }
     StatusCode::OK
 }
@@ -196,32 +209,39 @@ async fn steer_attached_snake(
         } else {
             hold.as_millis()
         };
-        let _ = app.events.send(
-            format!(
+        let _ = app.events.send(PadEvent {
+            json: format!(
                 r#"{{"t":"turn","mode":"{}","hold_ms":{hold_ms},"state":{}}}"#,
                 mode.as_str(),
                 String::from_utf8_lossy(raw)
             )
             .into(),
-        );
+            flipper: Some(board_frame(state, Moment::Turn { hold_ms })),
+        });
     }
     let (dir, source) = if !watched || mode == Mode::Auto {
         (autopilot::choose_move(state), Source::Auto)
     } else {
         wait_for_player(app, state, received + hold, this_move).await
     };
+    let mut control = app.control.lock().unwrap();
     if app.is_watched() {
-        let _ = app.events.send(
-            format!(
+        let _ = app.events.send(PadEvent {
+            json: format!(
                 r#"{{"t":"moved","turn":{},"move":"{}","source":"{}"}}"#,
                 state.turn,
                 dir.as_str(),
                 source.as_str()
             )
             .into(),
-        );
+            // Once a newer `/move` is counted the engine has given up on this one, and this board
+            // would replace the newer turn's on the Flipper; once `/end` has detached the snake it
+            // would replace the game-over board. Checked and sent under the lock, so neither can
+            // go out in between.
+            flipper: (control.latest_move == this_move && control.is_attached(state))
+                .then(|| board_frame(state, Moment::Moved(dir))),
+        });
     }
-    let mut control = app.control.lock().unwrap();
     if control.is_attached(state) {
         control.last_spent_ms = Some(received.elapsed().as_secs_f64() * 1000.0);
     }

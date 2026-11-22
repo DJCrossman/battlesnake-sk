@@ -282,6 +282,96 @@ async fn a_newer_turn_releases_the_older_request_without_taking_the_press() {
 }
 
 #[tokio::test]
+async fn the_flipper_gets_no_board_for_the_move_of_a_turn_the_engine_gave_up_on() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut page = connect_pad(&addr).await;
+    let mut flipper = connect_pad(&addr).await;
+    flipper.send(Message::binary(vec![7u8])).await.unwrap();
+    assert_eq!(
+        next_frame(&mut flipper).await,
+        Message::binary(vec![0xB1u8])
+    );
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    let Message::Binary(start) = next_frame(&mut flipper).await else {
+        panic!("expected the start board");
+    };
+    assert_eq!(start[..2], [0xB0, 0x01]);
+
+    let older = tokio::spawn({
+        let addr = addr.clone();
+        async move { post(&addr, "/move", &game_state("g1", "me", 3)).await }
+    });
+    let Message::Binary(turn) = next_frame(&mut flipper).await else {
+        panic!("expected turn 3's board");
+    };
+    assert_eq!(turn[4..6], [3, 0]);
+    let newer = tokio::spawn({
+        let addr = addr.clone();
+        async move { post(&addr, "/move", &game_state("g1", "me", 4)).await }
+    });
+    let (answer, _) = older.await.unwrap();
+    assert_eq!(answer, r#"{"move":"up"}"#);
+
+    // Turn 3's moved board would show turn 4 with nothing to hold for, before or after this one.
+    let Message::Binary(turn) = next_frame(&mut flipper).await else {
+        panic!("expected turn 4's board");
+    };
+    assert_eq!(turn[4..6], [4, 0]);
+    assert_eq!(turn[9..11], [35, 0]);
+    flipper.send(Message::binary(vec![2u8])).await.unwrap();
+    let (answer, _) = newer.await.unwrap();
+    assert_eq!(answer, r#"{"move":"left"}"#);
+    let Message::Binary(moved) = next_frame(&mut flipper).await else {
+        panic!("expected turn 4's moved board");
+    };
+    assert_eq!(moved[4..6], [5, 0]);
+    assert_eq!(moved[9..11], [0, 0]);
+    flipper.send(Message::binary(vec![5u8, 1])).await.unwrap();
+    assert_eq!(
+        next_frame(&mut flipper).await,
+        Message::binary(vec![5u8, 1])
+    );
+
+    // The pad page is still told how the older request was answered.
+    next_text_containing(&mut page, r#""t":"moved","turn":3,"#).await;
+}
+
+#[tokio::test]
+async fn the_flipper_keeps_the_game_over_board_when_the_last_move_answers_after_the_end() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut flipper = connect_pad(&addr).await;
+    flipper.send(Message::binary(vec![7u8])).await.unwrap();
+    assert_eq!(
+        next_frame(&mut flipper).await,
+        Message::binary(vec![0xB1u8])
+    );
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    next_frame(&mut flipper).await;
+
+    let last = tokio::spawn({
+        let addr = addr.clone();
+        async move { post(&addr, "/move", &game_state("g1", "me", 3)).await }
+    });
+    let Message::Binary(turn) = next_frame(&mut flipper).await else {
+        panic!("expected turn 3's board");
+    };
+    assert_eq!(turn[4..6], [3, 0]);
+    post(&addr, "/end", &game_state("g1", "me", 3)).await;
+    let Message::Binary(end) = next_frame(&mut flipper).await else {
+        panic!("expected the game-over board");
+    };
+    assert_eq!(end[1] & 0x02, 0x02);
+    last.await.unwrap();
+
+    // The move answered at its deadline, after the end: no board replaces the game-over one.
+    flipper.send(Message::binary(vec![5u8, 1])).await.unwrap();
+    assert_eq!(
+        next_frame(&mut flipper).await,
+        Message::binary(vec![5u8, 1])
+    );
+}
+
+#[tokio::test]
 async fn a_silent_pad_is_closed_and_moves_stop_waiting() {
     let addr = spawn_server(Duration::from_millis(300)).await;
     let mut pad = connect_pad(&addr).await;
@@ -342,6 +432,50 @@ async fn a_pad_that_asks_for_quiet_is_sent_no_state_frames() {
     pad.send(Message::binary(vec![5u8, 2])).await.unwrap();
     // Nor did the turn and moved frames come.
     assert_eq!(next_frame(&mut pad).await, Message::binary(vec![5u8, 2]));
+}
+
+#[tokio::test]
+async fn a_pad_that_asks_for_the_flipper_s_frames_gets_boards_and_no_text() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut pad = connect_pad(&addr).await;
+    pad.send(Message::binary(vec![7u8])).await.unwrap();
+    // Answered with the mode byte: assist.
+    assert_eq!(next_frame(&mut pad).await, Message::binary(vec![0xB1u8]));
+
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    let Message::Binary(start) = next_frame(&mut pad).await else {
+        panic!("expected the start board");
+    };
+    // The start byte, then the flags.
+    assert_eq!(start[..2], [0xB0, 0x01]);
+    assert_eq!(start.len(), 74);
+
+    post(&addr, "/move", &game_state("g1", "me", 3)).await;
+    let Message::Binary(turn) = next_frame(&mut pad).await else {
+        panic!("expected the turn board");
+    };
+    assert_eq!(turn[..2], [0xB0, 0x00]);
+    // 350 ms to press, in units of 10 ms.
+    assert_eq!(turn[9..11], [35, 0]);
+    let Message::Binary(moved) = next_frame(&mut pad).await else {
+        panic!("expected the moved board");
+    };
+    assert_eq!(moved[..2], [0xB0, 0x00]);
+    assert_eq!(moved[4..6], [4, 0]);
+    assert_eq!(moved[9..11], [0, 0]);
+
+    post(&addr, "/end", &game_state("g1", "me", 4)).await;
+    let Message::Binary(end) = next_frame(&mut pad).await else {
+        panic!("expected the game-over board");
+    };
+    // Game over, and ours is the only snake on the board.
+    assert_eq!(end[..2], [0xB0, 0x02 | 0x08]);
+
+    pad.send(Message::binary(vec![4u8])).await.unwrap();
+    assert_eq!(next_frame(&mut pad).await, Message::binary(vec![0xB2u8]));
+    // Nothing else was sent: the next frame is the echo.
+    pad.send(Message::binary(vec![5u8, 1])).await.unwrap();
+    assert_eq!(next_frame(&mut pad).await, Message::binary(vec![5u8, 1]));
 }
 
 #[tokio::test]
