@@ -9,6 +9,12 @@ permissions:
   id-token: write
   contents: read
 
+# One deploy at a time: two at once collide on SST's lock and the second fails. A push made while
+# one runs waits for it, and only the newest waiting push is deployed.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: 🚀 Deploy
