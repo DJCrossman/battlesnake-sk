@@ -4,13 +4,14 @@ A [Battlesnake](https://play.battlesnake.com) you steer in real time from a Flip
 autopilot behind you.
 
 ```
-Flipper Zero ──UART──▶ Wi-Fi Devboard ──phone hotspot──▶ server ◀──/move── Battlesnake engine
- Battlesnake app        wifi/ firmware    WebSocket
+Flipper Zero ◀─UART─▶ Wi-Fi Devboard ◀─phone hotspot─▶ server ◀──/move── Battlesnake engine
+ Battlesnake app       wifi/ firmware    WebSocket
+ presses out, board back
 ```
 
 - **`flipper/`** – the Battlesnake app. A Wi-Fi Devboard on the Flipper joins the phone's hotspot and
   holds the WebSocket itself, so the phone is only the path to the internet. The Flipper's buttons
-  steer and its screen shows the connection, not the board.
+  steer and its screen shows the live board.
 - **`server/`** – the Battlesnake server (Rust, axum). It also serves `/pad`, the page you watch a
   game on: it draws the live board and relays each key press to the server as one byte over a
   WebSocket.
@@ -37,9 +38,9 @@ running at the same time stays on autopilot. A phone that drops off the network 
 In `assist` the snake only keeps going straight for you; it does not look for food. Switch to
 `auto` (or close the page) when you are not steering.
 
-The page draws the board straight from the server: it appears when the game is created, updates
-the moment the engine asks for each move, and moves your own snake as soon as your move is
-committed, so what you see is the position your next press applies to.
+The Flipper and the page draw the board straight from the server: it appears when the game is
+created, updates the moment the engine asks for each move, and moves your own snake as soon as
+your move is committed, so what you see is the position your next press applies to.
 
 ## Controls
 
@@ -175,7 +176,14 @@ the board is connected and is green after that. The screen says where the connec
 | `Server refused token` | |
 | `Connected` | with the ping: the round trip Flipper → server → Flipper, measured every 2 s |
 
-Start a game and steer. Holding Back exits and tells the board to drop the hotspot.
+The status screen also shows the mode once the server has said which it is.
+
+Start a game and steer. While a game is on, the Flipper shows the board on the left: your snake
+solid with a hollow head, the others outlined, food as dots. On the right it shows the turn, your
+health and length, the mode and a bar for the time left to press. A game opens with rings around
+your head and a buzz. It ends with fireworks and a tune if you won, or your snake falling off the
+board if you lost. The final board then stays up until the next game. Holding Back exits and
+tells the board to drop the hotspot.
 
 ### WiFi link protocol
 
@@ -200,16 +208,40 @@ The Flipper and the board talk over the UART on the GPIO header at 115200 baud: 
 | `0xA6` | connected: the server answered the token |
 | `0xA7` | the server answered the last heartbeat |
 
-The board sends its state when it changes and in answer to each heartbeat, and is silent
-otherwise. Any other byte from it is the ESP32's boot text, which the Flipper ignores. A board
+| `0xB0` … | a board frame from the server, passed on unchanged (below) |
+| `0xB1`, `0xB2`, `0xB3` | the mode is now assist, manual, auto: once on connecting, then on every change |
+
+Every byte from `0x80` up starts one of these, and every byte inside a board frame is below
+`0x80`. So none can be taken for another, and a frame cut short is dropped when the next one
+starts. The board sends its state when it changes and in answer to each heartbeat. Any byte below
+`0x80` outside a frame is the ESP32's boot text, which the Flipper ignores. A board
 that gets no heartbeat from the Flipper for 6 seconds closes its socket and restarts, so a Flipper
 that goes away cannot leave a pad connected and the autopilot takes over again. A board that gets
 nothing from the server for 6 seconds drops the socket and connects again.
 
-On the WebSocket the board sends the token, then `[6]` to ask the server not to send it the board
-frames, then the heartbeats and the presses. A server from before that request ignores it; the
-board then reads the frames and throws them away, and drops its socket if one is over 15 kB (a
-turn of a four-snake 11×11 game is about 2 kB).
+On the WebSocket the board sends the token, then `[7]` to ask for the board frames in place of the
+JSON ones the pad page gets, then the heartbeats and the presses. The server answers `[7]` with the
+mode byte. It then sends a board frame when a game starts, when it is asked for each move, when our
+move is decided (our snake one step on, so the next press aims from where the head really is) and
+when the game ends. Each frame is a binary message that the board writes to the UART as it is.
+
+A server from before that request ignores it and sends JSON. The board throws that away, so the
+Flipper shows only the connection. The board drops its socket if a message is over 15 kB (a turn
+of a four-snake 11×11 game is about 2 kB of JSON). `[6]` asks for nothing at all.
+
+```
+0xB0           start
+[0]     flags  bit0 game just started · bit1 game over · bit2 board over 25×25 (width and height 0)
+               bit3 we won (ours is the only snake left) · bit4 we lost (ours is gone)
+[1]     width  [2] height
+[3, 4]  turn   14 bits, low 7 first
+[5]     health
+[6, 7]  length 14 bits
+[8, 9]  hold   time left to press in 10 ms, 14 bits
+[10 …]  cells  one nibble each, top row first, first cell in the high nibble:
+               0 empty · 1 food · 2 hazard · 3 my body · 4 my head · 5 other body · 6 other head
+then    s1 s2  over [0 …]: s1 = (s1 + byte) mod 128, s2 = (s2 + s1) mod 128
+```
 
 ## Deploy
 
@@ -246,7 +278,8 @@ The deploy fails until the secret is set. To change the token, set it again and 
 - The autopilot is a port of the original TypeScript heuristics. Like the original it treats
   hazards as walls and does not know about wrapped boards. It looks five moves ahead where the
   original effectively managed two, so it can choose differently.
-- Boards larger than 50×50 are refused.
+- Boards larger than 50×50 are refused. The Flipper draws boards up to 25×25; on a larger one it
+  says the board is too large to show, and the buttons still steer.
 - The WiFi link trusts one certificate authority for `wss://`, Amazon Root CA 1, which is what
   CloudFront uses. A server behind another authority needs its root added in `wifi/wifi.ino`.
 - `wifi.txt` holds the hotspot password and the pad token as plain text on the Flipper's SD card.
