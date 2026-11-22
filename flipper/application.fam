@@ -1,6 +1,6 @@
 App(
     appid="snake_pad",
-    name="Snake Pad",
+    name="Battlesnake",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="snake_pad_app",
     stack_size=4 * 1024,

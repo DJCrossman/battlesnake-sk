@@ -207,7 +207,7 @@ static void wifi_link_draw(Canvas* canvas, void* context) {
 
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 11, "Snake Pad");
+    canvas_draw_str(canvas, 2, 11, "Battlesnake");
 
     canvas_set_font(canvas, FontSecondary);
     const char* board = "Board not answering";

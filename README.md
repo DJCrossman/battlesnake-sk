@@ -5,10 +5,10 @@ autopilot behind you.
 
 ```
 Flipper Zero ──UART──▶ Wi-Fi Devboard ──phone hotspot──▶ server ◀──/move── Battlesnake engine
- Snake Pad app          wifi/ firmware    WebSocket
+ Battlesnake app        wifi/ firmware    WebSocket
 ```
 
-- **`flipper/`** – the Snake Pad app. A Wi-Fi Devboard on the Flipper joins the phone's hotspot and
+- **`flipper/`** – the Battlesnake app. A Wi-Fi Devboard on the Flipper joins the phone's hotspot and
   holds the WebSocket itself, so the phone is only the path to the internet. The Flipper's buttons
   steer and its screen shows the connection, not the board.
 - **`server/`** – the Battlesnake server (Rust, axum). It also serves `/pad`, the page you watch a
@@ -90,7 +90,7 @@ cd flipper
 ufbt launch
 ```
 
-That installs the app under Apps → Games → Snake Pad and starts it.
+That installs the app under Apps → Games → Battlesnake and starts it.
 
 ### Play over WiFi (WiFi link)
 
@@ -161,7 +161,7 @@ avoids it.
 Maximize Compatibility. If the Flipper says the hotspot is not found, keep that settings screen
 open while the board joins. On Android, choose the 2.4 GHz band in the hotspot's settings.
 
-**4. Plug the board into the Flipper and start Snake Pad.** The LED blinks blue until
+**4. Plug the board into the Flipper and start Battlesnake.** The LED blinks blue until
 the board is connected and is green after that. The screen says where the connection stands:
 
 | Screen | Meaning |
