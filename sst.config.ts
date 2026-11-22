@@ -58,14 +58,43 @@ export default $config({
     const role = new aws.iam.Role("BattlesnakeInstanceRole", {
       assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "ec2.amazonaws.com" }),
     });
-    new aws.iam.RolePolicyAttachment("BattlesnakeInstanceEcr", {
+    // Pulls this stack's image and nothing else. The registry login cannot be scoped to a
+    // repository.
+    new aws.iam.RolePolicy("BattlesnakeInstanceEcr", {
       role: role.name,
-      policyArn: aws.iam.ManagedPolicy.AmazonEC2ContainerRegistryReadOnly,
+      policy: $jsonStringify({
+        Version: "2012-10-17",
+        Statement: [
+          { Effect: "Allow", Action: "ecr:GetAuthorizationToken", Resource: "*" },
+          {
+            Effect: "Allow",
+            Action: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+            Resource: repository.arn,
+          },
+        ],
+      }),
     });
-    // Session Manager instead of SSH, so port 22 stays closed.
-    new aws.iam.RolePolicyAttachment("BattlesnakeInstanceSsm", {
+    // Session Manager instead of SSH, so port 22 stays closed. Only the minimal Session Manager
+    // permissions, without the parameter reads that come with AmazonSSMManagedInstanceCore:
+    // https://docs.aws.amazon.com/systems-manager/latest/userguide/getting-started-create-iam-instance-profile.html
+    new aws.iam.RolePolicy("BattlesnakeInstanceSsm", {
       role: role.name,
-      policyArn: aws.iam.ManagedPolicy.AmazonSSMManagedInstanceCore,
+      policy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Effect: "Allow",
+            Action: [
+              "ssm:UpdateInstanceInformation",
+              "ssmmessages:CreateControlChannel",
+              "ssmmessages:CreateDataChannel",
+              "ssmmessages:OpenControlChannel",
+              "ssmmessages:OpenDataChannel",
+            ],
+            Resource: "*",
+          },
+        ],
+      }),
     });
 
     const instance = new aws.ec2.Instance(
@@ -86,6 +115,9 @@ export default $config({
           }).id,
         ],
         iamInstanceProfile: new aws.iam.InstanceProfile("BattlesnakeInstanceProfile", { role: role.name }),
+        // IMDSv2 only, answered no further than one hop. The boot script's AWS CLI uses IMDSv2,
+        // and with --network host the container is on the host's network, not a hop away.
+        metadataOptions: { httpTokens: "required", httpPutResponseHopLimit: 1 },
         // Every download retries: the instance's public address changes when the Elastic IP
         // arrives, which can cut one off, and the role's credentials can lag behind the boot.
         userData: $interpolate`#!/bin/bash
