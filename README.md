@@ -148,6 +148,10 @@ Then, from `wifi/`, with that port:
 arduino-cli upload -p /dev/cu.usbmodem01
 ```
 
+The upload is done at `Hash of data verified`. It can then report `Could not configure port` and
+`Failed uploading`: that is the board restarting into the new firmware, which does not show up on
+USB at all.
+
 Press **RESET** when it finishes. Flashing again later needs download mode again. To put Black
 Magic back, run `ufbt devboard_flash` with the board in download mode.
 
