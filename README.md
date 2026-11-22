@@ -250,3 +250,6 @@ The deploy fails until the secret is set. To change the token, set it again and 
 - The WiFi link trusts one certificate authority for `wss://`, Amazon Root CA 1, which is what
   CloudFront uses. A server behind another authority needs its root added in `wifi/wifi.ino`.
 - `wifi.txt` holds the hotspot password and the pad token as plain text on the Flipper's SD card.
+- Port 80 on the Elastic IP serves `/pad` and `/ws` as well, over plain HTTP. Use the CloudFront
+  address for anything that carries the token.
+- The token should be random, such as one from `openssl rand -hex 16`.
