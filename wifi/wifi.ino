@@ -1,6 +1,6 @@
 // Flipper Zero Wi-Fi Devboard: carries the snake pad's presses from the Flipper's UART to the
-// server's /ws socket. The protocol on both sides is described in flipper/wifi_link.c and
-// server/src/pad.rs.
+// server's /ws socket, and the server's board frames back. The protocol on both sides is
+// described in flipper/wifi_link.c and server/src/pad.rs.
 
 #include <WiFi.h>
 #include <WebSocketsClient.h>
@@ -61,7 +61,9 @@ bool coreRetryUsed = false;
 
 void setup() {
   // Serial is UART0 on GPIO44 (RX) and GPIO43 (TX) while USB CDC on boot is off, which are the
-  // pins wired to the Flipper.
+  // pins wired to the Flipper. Without a TX buffer a board frame larger than the 128-byte FIFO
+  // would hold up loop(), and with it the Flipper's presses, until it was written.
+  Serial.setTxBufferSize(1024);
   Serial.begin(115200);
 }
 
@@ -228,15 +230,16 @@ void onSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     case WStype_CONNECTED: {
       webSocket.sendTXT(token);
       tokenSent = true;
-      // The board has no screen for the game, so it asks the server not to send it. A server
-      // from before that request ignores it, and the frames are thrown away below instead.
-      uint8_t quiet = 6;
-      webSocket.sendBIN(&quiet, 1);
+      // The Flipper draws the board from the server's compact frames, so the board asks for
+      // those instead of the JSON ones. A server from before that request ignores it and sends
+      // JSON, which is thrown away below.
+      uint8_t board = 7;
+      webSocket.sendBIN(&board, 1);
       break;
     }
     case WStype_TEXT:
       // The first text after the token is the hello. Any later text is a game frame from a server
-      // that does not know the request for quiet, and is not needed here.
+      // that does not know the request for the board, and is not needed here.
       accepted = true;
       refused = false;
       lastServerFrameAt = millis();
@@ -244,6 +247,8 @@ void onSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
     case WStype_BIN:
       lastServerFrameAt = millis();
       if (length > 0 && payload[0] == 5) Serial.write(BOARD_ECHOED);
+      // A board frame or a mode byte: it starts at 0x80 or above and is for the Flipper as it is.
+      if (length > 0 && payload[0] >= 0x80) Serial.write(payload, length);
       break;
     case WStype_DISCONNECTED:
       // The close code is not passed on, so a close between token and hello counts as refused.
