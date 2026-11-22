@@ -8,6 +8,8 @@
 #include <notification/notification_messages.h>
 #include <storage/storage.h>
 
+#include "board_screen.h"
+
 // What the Flipper sends the WiFi Devboard over the header UART
 typedef enum {
     WifiLinkCommandHeartbeat = 5,
@@ -15,8 +17,9 @@ typedef enum {
     WifiLinkCommandSettings = 0x10,
 } WifiLinkCommand;
 
-// What the board sends back. Every byte in 0xA0..0xA7 is one of these; anything else is the
-// ESP32's boot text.
+// What the board sends back. Every byte in 0xA0..0xA7 is one of these. The server's mode bytes
+// and board frames come through it unchanged (board_frame.h), and anything else is the ESP32's
+// boot text.
 typedef enum {
     WifiLinkBoardSilent = 0, // never sent: the board missed three heartbeats in a row
     WifiLinkBoardWaiting = 0xA0,
@@ -31,17 +34,21 @@ typedef enum {
 
 typedef enum {
     WifiLinkEventInput,
-    WifiLinkEventBoardByte,
+    WifiLinkEventBoardBytes, // the board sent bytes, which wait in WifiLinkRx
     WifiLinkEventTick,
 } WifiLinkEventType;
 
 typedef struct {
     WifiLinkEventType type;
-    union {
-        InputEvent input;
-        uint8_t board_byte;
-    };
+    InputEvent input;
 } WifiLinkEvent;
+
+// Filled by the UART interrupt: every byte the board sends, and one wake-up at a time
+typedef struct {
+    FuriMessageQueue* queue;
+    FuriStreamBuffer* bytes;
+    volatile bool woken; // a wake-up is in the queue, so more bytes need none
+} WifiLinkRx;
 
 // The press bytes the server reads, the same ones the pad page sends
 static const uint8_t wifi_link_button_byte[InputKeyMAX] = {
@@ -60,15 +67,20 @@ typedef struct {
     bool pinged;
     uint32_t ping_ms;
     uint32_t presses_sent;
+    BoardScreen screen;
 } WifiLinkState;
 
 static void wifi_link_draw(Canvas* canvas, void* context);
 static void wifi_link_forward_input(InputEvent* input, void* context);
-static void wifi_link_forward_board_byte(
+static void wifi_link_forward_board_bytes(
     FuriHalSerialHandle* serial,
     FuriHalSerialRxEvent event,
     void* context);
 static void wifi_link_forward_tick(void* context);
+static void wifi_link_set_board(
+    WifiLinkState* state,
+    NotificationApp* notifications,
+    WifiLinkBoardByte board);
 static const char* wifi_link_answer_settings_request(
     FuriHalSerialHandle* serial,
     uint32_t* hotspot_index,
@@ -84,11 +96,19 @@ static bool wifi_link_read_hotspot(
 // player holds Back.
 int32_t snake_pad_app(void* p) {
     UNUSED(p);
+    // Frames and the parser live on the heap, as the stack is 4 KB. Zeroed, the parser waits for
+    // a frame start and a frame is an empty board.
     WifiLinkState state = {
         .mutex = furi_mutex_alloc(FuriMutexTypeNormal),
         .hotspot = furi_string_alloc(),
+        .screen =
+            {.shown = calloc(1, sizeof(BoardFrame)), .previous = calloc(1, sizeof(BoardFrame))},
     };
     FuriMessageQueue* queue = furi_message_queue_alloc(16, sizeof(WifiLinkEvent));
+    BoardFrameParser* parser = calloc(1, sizeof(BoardFrameParser));
+    // The parser decodes into the spare frame, which then takes the shown one's place
+    BoardFrame* spare = calloc(1, sizeof(BoardFrame));
+    WifiLinkRx rx = {.queue = queue, .bytes = furi_stream_buffer_alloc(1024, 1)};
 
     ViewPort* view_port = view_port_alloc();
     view_port_draw_callback_set(view_port, wifi_link_draw, &state);
@@ -106,7 +126,7 @@ int32_t snake_pad_app(void* p) {
     FuriHalSerialHandle* serial = furi_hal_serial_control_acquire(FuriHalSerialIdUsart);
     furi_check(serial);
     furi_hal_serial_init(serial, 115200);
-    furi_hal_serial_async_rx_start(serial, wifi_link_forward_board_byte, queue, false);
+    furi_hal_serial_async_rx_start(serial, wifi_link_forward_board_bytes, &rx, false);
 
     // A board still set up by an earlier run starts over and asks for the settings again
     furi_hal_serial_tx(serial, (const uint8_t[]){WifiLinkCommandStop}, 1);
@@ -121,36 +141,25 @@ int32_t snake_pad_app(void* p) {
     uint32_t hotspot_index = 0;
     WifiLinkEvent event;
     bool running = true;
+    bool moving = false;
     while(running) {
-        furi_check(furi_message_queue_get(queue, &event, FuriWaitForever) == FuriStatusOk);
+        // While the board screen moves, it is redrawn about 30 times a second
+        const FuriStatus got =
+            furi_message_queue_get(queue, &event, moving ? furi_ms_to_ticks(33) : FuriWaitForever);
+        furi_check(got == FuriStatusOk || got == FuriStatusErrorTimeout);
         furi_mutex_acquire(state.mutex, FuriWaitForever);
-        const bool was_connected = state.board == WifiLinkBoardConnected;
 
-        if(event.type == WifiLinkEventTick) {
-            if(unanswered_heartbeats >= 3) state.board = WifiLinkBoardSilent;
+        if(got == FuriStatusErrorTimeout) {
+            // Only the redraw
+        } else if(event.type == WifiLinkEventTick) {
+            if(unanswered_heartbeats >= 3) {
+                wifi_link_set_board(&state, notifications, WifiLinkBoardSilent);
+            }
             heartbeat_sent_at = furi_get_tick();
             unanswered_heartbeats++;
             furi_hal_serial_tx(serial, (const uint8_t[]){WifiLinkCommandHeartbeat}, 1);
-        } else if(event.type == WifiLinkEventBoardByte) {
-            if(event.board_byte == WifiLinkBoardHeartbeatAnswered) {
-                state.ping_ms = furi_get_tick() - heartbeat_sent_at;
-                state.pinged = true;
-            } else {
-                unanswered_heartbeats = 0;
-                // The next hotspot in the file gets its turn. The board answers every heartbeat
-                // with its state, so only the first "not found" of a try counts. Stop makes the
-                // board start over and ask for the settings again.
-                if(event.board_byte == WifiLinkBoardHotspotNotFound &&
-                   state.board != WifiLinkBoardHotspotNotFound) {
-                    hotspot_index++;
-                    furi_hal_serial_tx(serial, (const uint8_t[]){WifiLinkCommandStop}, 1);
-                }
-                state.board = event.board_byte;
-                if(state.board == WifiLinkBoardWaiting) {
-                    state.settings_problem =
-                        wifi_link_answer_settings_request(serial, &hotspot_index, state.hotspot);
-                }
-            }
+        } else if(event.type == WifiLinkEventBoardBytes) {
+            rx.woken = false;
         } else if(event.input.key == InputKeyBack) {
             running = event.input.type != InputTypeLong;
         } else if(event.input.type == InputTypePress) {
@@ -158,17 +167,55 @@ int32_t snake_pad_app(void* p) {
             if(state.board == WifiLinkBoardConnected) state.presses_sent++;
         }
 
-        const bool connected = state.board == WifiLinkBoardConnected;
-        if(connected && !was_connected) {
-            notification_message(notifications, &sequence_blink_stop);
-            notification_message(notifications, &sequence_set_only_green_255);
-            // A new connection shows no ping until the server answers it
-            state.pinged = false;
-        } else if(!connected && was_connected) {
-            notification_message(notifications, &sequence_reset_rgb);
-            notification_message(notifications, &sequence_blink_start_blue);
+        // On every pass, as the wake-up for these bytes may not have fit in the queue
+        uint8_t byte;
+        while(furi_stream_buffer_receive(rx.bytes, &byte, 1, 0) == 1) {
+            if(byte >= WifiLinkBoardWaiting && byte <= WifiLinkBoardHeartbeatAnswered) {
+                if(byte == WifiLinkBoardHeartbeatAnswered) {
+                    state.ping_ms = furi_get_tick() - heartbeat_sent_at;
+                    state.pinged = true;
+                } else {
+                    unanswered_heartbeats = 0;
+                    // The next hotspot in the file gets its turn. The board answers every
+                    // heartbeat with its state, so only the first "not found" of a try counts.
+                    // Stop makes the board start over and ask for the settings again.
+                    if(byte == WifiLinkBoardHotspotNotFound &&
+                       state.board != WifiLinkBoardHotspotNotFound) {
+                        hotspot_index++;
+                        furi_hal_serial_tx(serial, (const uint8_t[]){WifiLinkCommandStop}, 1);
+                    }
+                    wifi_link_set_board(&state, notifications, byte);
+                    if(state.board == WifiLinkBoardWaiting) {
+                        state.settings_problem = wifi_link_answer_settings_request(
+                            serial, &hotspot_index, state.hotspot);
+                    }
+                }
+            } else if(byte >= BOARD_MODE_BYTE_ASSIST && byte <= BOARD_MODE_BYTE_AUTO) {
+                // In BoardMode's order
+                state.screen.mode = BoardModeAssist + (byte - BOARD_MODE_BYTE_ASSIST);
+            } else if(board_frame_parser_feed(parser, byte, spare)) {
+                // The frame shown so far becomes the previous one, for the loss animation
+                BoardFrame* const oldest = state.screen.previous;
+                state.screen.previous = state.screen.shown;
+                state.screen.shown = spare;
+                spare = oldest;
+                state.screen.has_frame = true;
+                state.screen.shown_tick = furi_get_tick();
+                // The start plays on over the turn-0 frames right behind it
+                if(state.screen.shown->flags & BOARD_FLAG_GAME_STARTED) {
+                    state.screen.started_tick = state.screen.shown_tick;
+                }
+                // Half the ping is about how long the frame took to get here
+                const uint32_t hold_ms = state.screen.shown->hold_10ms * 10;
+                const uint32_t late_ms = state.pinged ? state.ping_ms / 2 : 0;
+                state.screen.hold_ms = hold_ms > late_ms ? hold_ms - late_ms : 0;
+                const NotificationSequence* sequence =
+                    board_screen_arrival_sequence(state.screen.shown);
+                if(sequence) notification_message(notifications, sequence);
+            }
         }
 
+        moving = state.board == WifiLinkBoardConnected && board_screen_is_moving(&state.screen);
         furi_mutex_release(state.mutex);
         view_port_update(view_port);
     }
@@ -191,11 +238,19 @@ int32_t snake_pad_app(void* p) {
     notification_message(notifications, &sequence_blink_stop);
     notification_message(notifications, &sequence_reset_rgb);
     notification_message(notifications, &sequence_display_backlight_enforce_auto);
+    // A win or loss tune lives in the app, so the app waits for the last one to finish
+    notification_message_block(notifications, &sequence_empty);
     furi_record_close(RECORD_NOTIFICATION);
 
     view_port_free(view_port);
     furi_record_close(RECORD_GUI);
+    // Receiving stopped above, so the interrupt no longer writes to these
+    furi_stream_buffer_free(rx.bytes);
     furi_message_queue_free(queue);
+    free(spare);
+    free(parser);
+    free(state.screen.previous);
+    free(state.screen.shown);
     furi_string_free(state.hotspot);
     furi_mutex_free(state.mutex);
     return 0;
@@ -204,6 +259,11 @@ int32_t snake_pad_app(void* p) {
 static void wifi_link_draw(Canvas* canvas, void* context) {
     WifiLinkState* state = context;
     furi_mutex_acquire(state->mutex, FuriWaitForever);
+    if(state->board == WifiLinkBoardConnected && state->screen.has_frame) {
+        board_screen_draw(canvas, &state->screen);
+        furi_mutex_release(state->mutex);
+        return;
+    }
 
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
@@ -254,6 +314,12 @@ static void wifi_link_draw(Canvas* canvas, void* context) {
     snprintf(sent, sizeof(sent), "Sent: %lu", state->presses_sent);
     canvas_draw_str(canvas, 2, 40, sent);
 
+    if(state->screen.mode != BoardModeUnknown) {
+        char mode[24];
+        snprintf(mode, sizeof(mode), "Mode: %s", board_screen_mode_names[state->screen.mode]);
+        canvas_draw_str(canvas, 2, 49, mode);
+    }
+
     canvas_draw_line(canvas, 0, 52, 127, 52);
     canvas_draw_str(canvas, 2, 62, "OK:mode   Hold Back:exit");
 
@@ -265,22 +331,54 @@ static void wifi_link_forward_input(InputEvent* input, void* context) {
     furi_message_queue_put(context, &event, FuriWaitForever);
 }
 
-// Runs in the UART interrupt, so nothing here may wait
-static void wifi_link_forward_board_byte(
+// Runs in the UART interrupt, so nothing here may wait. The main loop reads every waiting byte on
+// each pass, so one queued wake-up at a time is enough: a frame or the ESP32's boot text at reset
+// cannot flood the queue, and one that did not fit is tried again with the next byte.
+static void wifi_link_forward_board_bytes(
     FuriHalSerialHandle* serial,
     FuriHalSerialRxEvent event,
     void* context) {
+    WifiLinkRx* rx = context;
     if(!(event & FuriHalSerialRxEventData)) return;
-    const uint8_t byte = furi_hal_serial_async_rx(serial);
-    // Drop the ESP32's boot text here, or its ~100 bytes at reset would flood the queue
-    if(byte < WifiLinkBoardWaiting || byte > WifiLinkBoardHeartbeatAnswered) return;
-    WifiLinkEvent board_event = {.type = WifiLinkEventBoardByte, .board_byte = byte};
-    furi_message_queue_put(context, &board_event, 0);
+    while(furi_hal_serial_async_rx_available(serial)) {
+        const uint8_t byte = furi_hal_serial_async_rx(serial);
+        furi_stream_buffer_send(rx->bytes, &byte, 1, 0);
+    }
+    if(!rx->woken) {
+        WifiLinkEvent board_event = {.type = WifiLinkEventBoardBytes};
+        rx->woken = furi_message_queue_put(rx->queue, &board_event, 0) == FuriStatusOk;
+    }
 }
 
 // Runs on the timer thread, which must not block on a full queue
 static void wifi_link_forward_tick(void* context) {
     furi_message_queue_put(context, &(WifiLinkEvent){.type = WifiLinkEventTick}, 0);
+}
+
+// The board's state, from its byte or its silence. The LED follows it onto and off the server,
+// and each connection starts with no ping, board or mode until the server sends them.
+static void wifi_link_set_board(
+    WifiLinkState* state,
+    NotificationApp* notifications,
+    WifiLinkBoardByte board) {
+    const bool was_connected = state->board == WifiLinkBoardConnected;
+    state->board = board;
+    const bool connected = state->board == WifiLinkBoardConnected;
+    if(connected && !was_connected) {
+        notification_message(notifications, &sequence_blink_stop);
+        notification_message(notifications, &sequence_set_only_green_255);
+        // A new connection shows no ping until the server answers it
+        state->pinged = false;
+    } else if(!connected && was_connected) {
+        notification_message(notifications, &sequence_reset_rgb);
+        notification_message(notifications, &sequence_blink_start_blue);
+        // Forgotten as the board leaves rather than on connecting, because the server's mode byte
+        // can come through just before the board says it is connected. The shown frame becomes
+        // the next one's previous, so it is emptied rather than left from this connection.
+        state->screen.has_frame = false;
+        state->screen.mode = BoardModeUnknown;
+        memset(state->screen.shown, 0, sizeof(BoardFrame));
+    }
 }
 
 // Reads the settings from the SD card each time the board asks, so the hotspot passwords and

@@ -4,7 +4,7 @@ App(
     apptype=FlipperAppType.EXTERNAL,
     entry_point="snake_pad_app",
     stack_size=4 * 1024,
-    sources=["wifi_link.c"],
+    sources=["wifi_link.c", "board_frame.c", "board_screen.c"],
     fap_category="Games",
     fap_icon="snake_pad_10px.png",
     fap_version="1.0",
