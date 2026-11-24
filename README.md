@@ -135,24 +135,36 @@ USB at all.
 Press **RESET** when it finishes. Flashing again later needs download mode again. To put Black
 Magic back, run `ufbt devboard_flash` with the board in download mode.
 
-**2. Write the settings file.** With qFlipper's file manager or the Flipper mobile app, create
-`SD Card/apps_data/snake_pad/wifi.txt`:
+**2. Write the settings file.** Copy `flipper/wifi.example.json` to `flipper/wifi.json` and fill
+it in. `flipper/wifi.json` is git-ignored, so the passwords and the token stay out of the repo.
 
+```json
+{
+  "server": "wss://<the pad address from the deploy log, without https://>",
+  "token": "<CONTROL_TOKEN>",
+  "networks": [
+    { "name": "<the first hotspot's name>", "password": "<its password>" },
+    { "name": "<the next hotspot's name>", "password": "<its password>" }
+  ]
+}
 ```
-Hotspot: <the hotspot's name>
-Password: <the hotspot's password>
-Server: wss://<the pad address from the deploy log, without https://>
-Token: <CONTROL_TOKEN>
+
+List one network, or several, such as home and work. The app tries them in the order listed,
+moving to the next whenever the board reports the current one not found and back to the first
+after the last, so a network further down the list takes about 8 seconds longer per network above
+it. The values are JSON strings, so a `"` or `\` in a password is written `\"` or `\\`.
+
+For a server on your own computer, use `"server": "ws://<its address on the hotspot>:8000"`. The
+app reads the file each time the board asks for it and the board keeps the settings only in
+memory, so neither the app nor the firmware contains them.
+
+Put the file on the Flipper as `SD Card/apps_data/snake_pad/wifi.json` with qFlipper's file
+manager or the Flipper mobile app, or with this command from the repo root, with the Flipper
+connected over USB:
+
+```bash
+~/.ufbt/toolchain/arm64-darwin/bin/python3 ~/.ufbt/current/scripts/storage.py -p auto send flipper/wifi.json /ext/apps_data/snake_pad/wifi.json
 ```
-
-For more than one network, such as home and work, list a `Hotspot` line and its `Password` line
-for each, each password right after its hotspot. The app tries them in the order listed, moving
-to the next whenever the board reports the current one not found and back to the first after the
-last, so a network further down the list takes about 8 seconds longer per network above it.
-
-For a server on your own computer, use `Server: ws://<its address on the hotspot>:8000`. The app
-reads the file each time the board asks for it and the board keeps the settings only in memory, so
-neither the app nor the firmware contains them.
 
 The hotspot's name has to match exactly. An iPhone's default name has a curly apostrophe
 (`David’s iPhone`), which is easy to get wrong; renaming the phone in Settings → General → About
@@ -168,7 +180,8 @@ the board is connected and is green after that. The screen says where the connec
 | Screen | Meaning |
 | --- | --- |
 | `Board not answering` | the board is not plugged in or not flashed. It also shows for a few seconds at a time while the board is tied up reaching a server that does not answer |
-| `No settings file`, `Settings file incomplete` | check `apps_data/snake_pad/wifi.txt` and its four keys |
+| `No settings file`, `Settings file incomplete` | check `apps_data/snake_pad/wifi.json` for the server, the token and each network's name and password |
+| `Settings file invalid` | `wifi.json` is not JSON, is over 4 KB or 24 networks, or has a value that is not in quotes or has a line break in it |
 | `Joining hotspot` | the line below names it |
 | `Hotspot not found` | the hotspot named below is off, out of range or on 5 GHz only; the next one in the file gets its turn |
 | `Hotspot refused password` | for the hotspot named below |
@@ -282,7 +295,8 @@ The deploy fails until the secret is set. To change the token, set it again and 
   says the board is too large to show, and the buttons still steer.
 - The WiFi link trusts one certificate authority for `wss://`, Amazon Root CA 1, which is what
   CloudFront uses. A server behind another authority needs its root added in `wifi/wifi.ino`.
-- `wifi.txt` holds the hotspot password and the pad token as plain text on the Flipper's SD card.
+- `wifi.json` holds the hotspot passwords and the pad token as plain text on the Flipper's SD card,
+  and in `flipper/wifi.json` on the computer it was written on.
 - Port 80 on the Elastic IP serves `/pad` and `/ws` as well, over plain HTTP. Use the CloudFront
   address for anything that carries the token.
 - The token should be random, such as one from `openssl rand -hex 16`.

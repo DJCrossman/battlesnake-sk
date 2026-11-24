@@ -2,13 +2,13 @@
 #include <furi_hal_serial.h>
 #include <furi_hal_serial_control.h>
 #include <expansion/expansion.h>
-#include <flipper_format/flipper_format.h>
 #include <gui/gui.h>
 #include <input/input.h>
 #include <notification/notification_messages.h>
 #include <storage/storage.h>
 
 #include "board_screen.h"
+#include "wifi_settings.h"
 
 // What the Flipper sends the WiFi Devboard over the header UART
 typedef enum {
@@ -85,11 +85,6 @@ static const char* wifi_link_answer_settings_request(
     FuriHalSerialHandle* serial,
     uint32_t* hotspot_index,
     FuriString* hotspot);
-static bool wifi_link_read_hotspot(
-    FlipperFormat* file,
-    uint32_t index,
-    FuriString* hotspot,
-    FuriString* password);
 
 // A WiFi Devboard on the GPIO header holds the connection to the game server, and the Flipper
 // sends it the settings from the SD card and the button bytes. Needs a hotspot. Runs until the
@@ -277,7 +272,7 @@ static void wifi_link_draw(Canvas* canvas, void* context) {
     case WifiLinkBoardWaiting:
         board = state->settings_problem ? state->settings_problem : "Board ready";
         // The full path is wider than the screen; apps_data is where every app keeps its files
-        if(state->settings_problem) detail = "snake_pad/wifi.txt";
+        if(state->settings_problem) detail = "snake_pad/wifi.json";
         break;
     case WifiLinkBoardJoining:
         board = "Joining hotspot";
@@ -381,47 +376,46 @@ static void wifi_link_set_board(
     }
 }
 
-// Reads the settings from the SD card each time the board asks, so the hotspot passwords and
-// pad token never live in the app. The board is sent the hotspot at *hotspot_index, or the first
-// one once the index has gone past the last, and its name is left in hotspot. Returns what is
-// wrong with the file, or NULL once sent.
+// Reads wifi.json (wifi_settings.h) from the SD card each time the board asks, so the hotspot
+// passwords and pad token never live in the app. The board is sent the network at
+// *hotspot_index, or the first one once the index has gone past the last, and its name is left
+// in hotspot. Returns what is wrong with the file, or NULL once sent.
 static const char* wifi_link_answer_settings_request(
     FuriHalSerialHandle* serial,
     uint32_t* hotspot_index,
     FuriString* hotspot) {
     Storage* storage = furi_record_open(RECORD_STORAGE);
-    FlipperFormat* file = flipper_format_file_alloc(storage);
+    File* file = storage_file_alloc(storage);
+    // On the heap, as the stack is 4 KB. One byte past the cap is read, so that a longer file is
+    // refused rather than read in part.
+    char* json = malloc(WIFI_SETTINGS_FILE_MAX + 1);
     FuriString* settings = furi_string_alloc();
     furi_string_push_back(settings, WifiLinkCommandSettings);
-    FuriString* value = furi_string_alloc();
     const char* problem = NULL;
 
-    if(!flipper_format_file_open_existing(file, APP_DATA_PATH("wifi.txt"))) {
+    if(!storage_file_open(file, APP_DATA_PATH("wifi.json"), FSAM_READ, FSOM_OPEN_EXISTING)) {
         problem = "No settings file";
     } else {
-        if(!wifi_link_read_hotspot(file, *hotspot_index, hotspot, value)) {
+        const size_t len = storage_file_read(file, json, WIFI_SETTINGS_FILE_MAX + 1);
+        WifiSettings values;
+        WifiSettingsResult result = wifi_settings_for_network(json, len, *hotspot_index, &values);
+        if(result == WifiSettingsPastLast) {
             *hotspot_index = 0;
-            if(!wifi_link_read_hotspot(file, 0, hotspot, value)) {
-                problem = "Settings file incomplete";
-            }
+            result = wifi_settings_for_network(json, len, 0, &values);
         }
-        if(!problem) {
+        if(result == WifiSettingsFound) {
+            furi_string_set_str(hotspot, values.hotspot);
             // In the order the board reads them
-            furi_string_cat(settings, hotspot);
-            furi_string_push_back(settings, '\n');
-            furi_string_cat(settings, value);
-            furi_string_push_back(settings, '\n');
-        }
-        // Rewind before each, so the file may list them anywhere. flipper_format already drops
-        // the \r of a CRLF file and keeps spaces inside a value, which a password may have.
-        static const char* const keys[] = {"Server", "Token"};
-        for(size_t i = 0; i < COUNT_OF(keys) && !problem; i++) {
-            if(flipper_format_rewind(file) && flipper_format_read_string(file, keys[i], value)) {
-                furi_string_cat(settings, value);
-                furi_string_push_back(settings, '\n');
-            } else {
-                problem = "Settings file incomplete";
-            }
+            furi_string_cat_printf(
+                settings,
+                "%s\n%s\n%s\n%s\n",
+                values.hotspot,
+                values.password,
+                values.server,
+                values.token);
+        } else {
+            problem = result == WifiSettingsInvalid ? "Settings file invalid" :
+                                                      "Settings file incomplete";
         }
     }
 
@@ -430,26 +424,10 @@ static const char* wifi_link_answer_settings_request(
             serial, (const uint8_t*)furi_string_get_cstr(settings), furi_string_size(settings));
     }
 
-    furi_string_free(value);
     furi_string_free(settings);
-    flipper_format_free(file);
+    free(json);
+    storage_file_close(file);
+    storage_file_free(file);
     furi_record_close(RECORD_STORAGE);
     return problem;
-}
-
-// The file lists one Hotspot line and its Password line per network, in the order they are
-// tried. Each read carries on from the one before, so the pair at index is that many pairs in.
-static bool wifi_link_read_hotspot(
-    FlipperFormat* file,
-    uint32_t index,
-    FuriString* hotspot,
-    FuriString* password) {
-    if(!flipper_format_rewind(file)) return false;
-    for(uint32_t i = 0; i <= index; i++) {
-        if(!flipper_format_read_string(file, "Hotspot", hotspot) ||
-           !flipper_format_read_string(file, "Password", password)) {
-            return false;
-        }
-    }
-    return true;
 }

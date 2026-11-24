@@ -1,2 +1,4 @@
 dist/
 .vscode/
+# The real settings: hotspot passwords and the pad token
+/wifi.json

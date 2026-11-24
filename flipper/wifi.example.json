@@ -1,0 +1,8 @@
+{
+  "server": "wss://<the pad address from the deploy log, without https://>",
+  "token": "<CONTROL_TOKEN>",
+  "networks": [
+    { "name": "<the first hotspot's name>", "password": "<its password>" },
+    { "name": "<the next hotspot's name>", "password": "<its password>" }
+  ]
+}
