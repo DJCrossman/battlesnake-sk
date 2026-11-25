@@ -18,7 +18,9 @@ typedef enum {
 
 // The app fills this under its mutex
 typedef struct {
-    bool has_frame; // a frame arrived since connecting; shown and previous are always allocated
+    // A frame arrived since connecting and is not a game over past its 15 s. Shown and previous
+    // are always allocated.
+    bool has_frame;
     BoardFrame* shown;
     // The frame before it, for the loss animation: at the end the engine has already removed our
     // snake from the board
