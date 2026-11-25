@@ -25,6 +25,11 @@ use control::{Control, Mode, Source};
 use flipper::{Moment, board_frame};
 use game::{Direction, GameState};
 
+/// How long a pad may send nothing before it is closed. The page sends an echo request every 2 s
+/// and the Flipper's board passes on its heartbeat every 2 s, so 4 s lets one of them come a whole
+/// interval late, as one can over a phone hotspot, and no later.
+pub const PAD_IDLE: Duration = Duration::from_secs(4);
+
 pub struct Config {
     /// The pad's first WebSocket message must equal this.
     pub token: String,

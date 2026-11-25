@@ -446,6 +446,28 @@ async fn a_silent_pad_is_closed_and_moves_stop_waiting() {
     assert!(took < Duration::from_millis(50), "{took:?}");
 }
 
+/// The page and the Flipper's board each send something every 2 s; one of them may come a whole
+/// interval late.
+#[tokio::test]
+async fn a_pad_may_send_one_heartbeat_a_whole_interval_late_and_no_later() {
+    let addr = spawn_server(battlesnake_sk::PAD_IDLE).await;
+    let mut pad = connect_pad(&addr).await;
+    let heard = Instant::now();
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match pad.next().await {
+                Some(Ok(Message::Text(_))) => continue,
+                _ => return,
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the silent pad was not closed within 5 s");
+    let took = heard.elapsed();
+    assert!(took >= Duration::from_millis(3_900), "{took:?}");
+    assert!(took < Duration::from_millis(4_500), "{took:?}");
+}
+
 /// Everything the WiFi board sends: the token, the request for quiet, a `[5, n]` heartbeat on a
 /// timer and one byte per press.
 #[tokio::test]

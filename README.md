@@ -34,7 +34,7 @@ With no pad connected the autopilot plays every game and answers in well under a
 pad steers one snake in one game at a time: the first game to start while no other is in
 progress. That game keeps the pad until it ends or goes a minute without a request from the
 engine, and any other game running at the same time stays on autopilot. A phone that drops off
-the network is noticed within 6 seconds, after which the autopilot takes over again.
+the network is noticed within 4 seconds, after which the autopilot takes over again.
 
 In `assist` the snake only keeps going straight for you; it does not look for food. Switch to
 `auto` (or close the page) when you are not steering.
