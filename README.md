@@ -31,9 +31,10 @@ presses are queued, so a quick double turn works. A press back into your own nec
 | `auto` | ignored | the autopilot answers immediately |
 
 With no pad connected the autopilot plays every game and answers in well under a millisecond. The
-pad steers one snake in one game at a time — the game that started most recently; any other game
-running at the same time stays on autopilot. A phone that drops off the network is noticed within
-6 seconds, after which the autopilot takes over again.
+pad steers one snake in one game at a time: the first game to start while no other is in
+progress. That game keeps the pad until it ends or goes a minute without a request from the
+engine, and any other game running at the same time stays on autopilot. A phone that drops off
+the network is noticed within 6 seconds, after which the autopilot takes over again.
 
 In `assist` the snake only keeps going straight for you; it does not look for food. Switch to
 `auto` (or close the page) when you are not steering.
@@ -284,7 +285,8 @@ The deploy fails until the secret is set. To change the token, set it again and 
   last hop is not encrypted.
 - The token is readable in the instance's user data by anyone with access to the AWS account.
 - `/start`, `/move` and `/end` are open, as the Battlesnake API requires. Someone who knows the URL
-  can start a game against the snake, and the pad follows the most recently started game.
+  can start a game against the snake. While no game is in progress the pad follows it, and one
+  that never asks for a move holds the pad for a minute.
 
 ## Limits
 

@@ -105,9 +105,18 @@ async fn start_game(State(app): State<Arc<App>>, body: Bytes) -> StatusCode {
     let Ok(state) = serde_json::from_slice::<GameState>(&body) else {
         return StatusCode::BAD_REQUEST;
     };
-    app.control.lock().unwrap().attach(&state);
-    info!(game = %state.game.id, snake = %state.you.id, timeout_ms = state.game.timeout, "game started");
-    if app.is_watched() {
+    // A game in progress keeps the pad; this one is then the autopilot's alone.
+    let attached = {
+        let mut control = app.control.lock().unwrap();
+        if control.has_game_in_progress(Instant::now()) {
+            false
+        } else {
+            control.attach(&state);
+            true
+        }
+    };
+    info!(game = %state.game.id, snake = %state.you.id, timeout_ms = state.game.timeout, attached, "game started");
+    if attached && app.is_watched() {
         let _ = app.events.send(PadEvent {
             json: format!(
                 r#"{{"t":"start","state":{}}}"#,
@@ -127,11 +136,12 @@ async fn play_move(State(app): State<Arc<App>>, body: Bytes) -> Response {
     };
     let attached = {
         let mut control = app.control.lock().unwrap();
-        if !control.has_attachment() {
+        if !control.has_game_in_progress(received) {
             control.attach(&state);
             info!(game = %state.game.id, snake = %state.you.id, "game attached");
         }
         if control.is_attached(&state) {
+            control.heard_from_attached(received);
             let latency = state.you.latency.trim().parse::<f64>().unwrap_or(0.0);
             if let (true, Some(spent)) = (latency > 0.0, control.last_spent_ms) {
                 control

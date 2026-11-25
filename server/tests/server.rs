@@ -111,6 +111,61 @@ async fn another_game_is_played_by_the_autopilot_without_waiting() {
 }
 
 #[tokio::test]
+async fn a_game_started_mid_game_is_the_autopilot_s_and_sends_the_pads_nothing() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut page = connect_pad(&addr).await;
+    let mut flipper = connect_pad(&addr).await;
+    flipper.send(Message::binary(vec![7u8])).await.unwrap();
+    assert_eq!(
+        next_frame(&mut flipper).await,
+        Message::binary(vec![0xB1u8])
+    );
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    let start = next_text_containing(&mut page, r#""t":"start""#).await;
+    assert!(start.contains(r#""id": "g1""#), "{start}");
+    let Message::Binary(start) = next_frame(&mut flipper).await else {
+        panic!("expected g1's start board");
+    };
+    assert_eq!(start[..2], [0xB0, 0x01]);
+
+    post(&addr, "/start", &game_state("g2", "me", 3)).await;
+    let (_, took) = post(&addr, "/move", &game_state("g2", "me", 3)).await;
+    assert!(took < Duration::from_millis(50), "{took:?}");
+    // Neither pad was sent anything for g2: the next frame on each is the echo.
+    page.send(Message::binary(vec![5u8, 1])).await.unwrap();
+    assert_eq!(next_frame(&mut page).await, Message::binary(vec![5u8, 1]));
+    flipper.send(Message::binary(vec![5u8, 1])).await.unwrap();
+    assert_eq!(
+        next_frame(&mut flipper).await,
+        Message::binary(vec![5u8, 1])
+    );
+
+    // g1 still has the pad.
+    let (answer, took) = post(&addr, "/move", &game_state("g1", "me", 3)).await;
+    assert_eq!(answer, r#"{"move":"up"}"#);
+    assert!(took >= HOLD - Duration::from_millis(10), "{took:?}");
+    let turn = next_text_containing(&mut page, r#""t":"turn""#).await;
+    assert!(turn.contains(r#""id": "g1""#), "{turn}");
+}
+
+#[tokio::test]
+async fn the_pad_stays_with_its_game_to_the_end_and_then_moves_on() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let mut page = connect_pad(&addr).await;
+    post(&addr, "/start", &game_state("g1", "me", 3)).await;
+    post(&addr, "/start", &game_state("g2", "me", 3)).await;
+    post(&addr, "/end", &game_state("g1", "me", 9)).await;
+    let end = next_text_containing(&mut page, r#""t":"end""#).await;
+    assert!(end.contains(r#""id": "g1""#), "{end}");
+
+    post(&addr, "/start", &game_state("g3", "me", 0)).await;
+    let start = next_text_containing(&mut page, r#""t":"start""#).await;
+    assert!(start.contains(r#""id": "g3""#), "{start}");
+    let (_, took) = post(&addr, "/move", &game_state("g3", "me", 3)).await;
+    assert!(took >= HOLD - Duration::from_millis(10), "{took:?}");
+}
+
+#[tokio::test]
 async fn echo_frames_come_back_unchanged() {
     let addr = spawn_server(PAD_IDLE).await;
     let mut pad = connect_pad(&addr).await;

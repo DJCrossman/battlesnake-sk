@@ -1,7 +1,7 @@
 //! The rules for turning the player's key presses into moves, and the timing they run against.
 
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::game::{Direction, GameState};
 
@@ -27,7 +27,8 @@ pub enum Source {
 #[derive(Default)]
 pub struct Control {
     pub queue: InputQueue,
-    /// The snake the pad steers: ours in the latest `/start`, or in the first game seen on `/move`.
+    /// The snake the pad steers: ours in the first `/start` or `/move` that comes while no game is
+    /// in progress.
     attached: Option<Attachment>,
     pub overhead: Overhead,
     /// How long we took to answer the attached snake's previous `/move`.
@@ -41,7 +42,12 @@ pub struct Control {
 struct Attachment {
     game: String,
     snake: String,
+    /// The last `/start` or `/move` for it.
+    heard: Instant,
 }
+
+/// A minute: a real game's longest quiet spell, `/start` to its first `/move`, is a few timeouts.
+const QUIET_GAME: Duration = Duration::from_secs(60);
 
 /// Presses waiting for a turn. Two are kept so a quick double turn works; more are dropped.
 #[derive(Debug, Default)]
@@ -113,10 +119,27 @@ impl Control {
         self.attached = Some(Attachment {
             game: state.game.id.to_string(),
             snake: state.you.id.to_string(),
+            heard: Instant::now(),
         });
         self.queue.clear();
         self.last_spent_ms = None;
         self.overhead = Overhead::default();
+    }
+
+    /// Whether the attached game still keeps the pad at `now`: it has not ended, and it had a
+    /// `/start` or `/move` within the last minute, so one the engine abandoned (or a forged
+    /// `/start` that never asks for a move) lets go of it.
+    pub fn has_game_in_progress(&self, now: Instant) -> bool {
+        self.attached
+            .as_ref()
+            .is_some_and(|a| now.duration_since(a.heard) < QUIET_GAME)
+    }
+
+    /// Notes a `/move` for the attached snake, received at `at`.
+    pub fn heard_from_attached(&mut self, at: Instant) {
+        if let Some(attached) = &mut self.attached {
+            attached.heard = at;
+        }
     }
 
     /// Releases the pad if `state`'s snake holds it; returns whether it did.
@@ -283,6 +306,24 @@ mod tests {
         assert!(control.detach(&state));
         assert!(!control.has_attachment());
         assert!(control.queue.inputs.is_empty());
+    }
+
+    #[test]
+    fn a_game_keeps_the_pad_until_it_ends_or_goes_a_minute_without_a_request() {
+        let state = bottom_row();
+        let mut control = Control::default();
+        let started = Instant::now();
+        control.attach(&state);
+        assert!(control.has_game_in_progress(started + Duration::from_secs(59)));
+        assert!(!control.has_game_in_progress(started + Duration::from_secs(61)));
+
+        // Each `/move` holds it for another minute.
+        control.heard_from_attached(started + Duration::from_secs(50));
+        assert!(control.has_game_in_progress(started + Duration::from_secs(109)));
+        assert!(!control.has_game_in_progress(started + Duration::from_secs(111)));
+
+        control.detach(&state);
+        assert!(!control.has_game_in_progress(started));
     }
 
     #[test]
