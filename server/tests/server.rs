@@ -427,6 +427,54 @@ async fn the_flipper_keeps_the_game_over_board_when_the_last_move_answers_after_
 }
 
 #[tokio::test]
+async fn no_move_after_ours_shows_the_loss_at_once_and_frees_the_pad() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let (mut page, mut flipper) = watch_our_snake_go_out(&addr).await;
+    // The next game takes the pad.
+    post(&addr, "/start", &game_state("g2", "me", 0)).await;
+    let start = next_text_containing(&mut page, r#""t":"start""#).await;
+    assert!(start.contains(r#""id": "g2""#), "{start}");
+    let Message::Binary(start) = next_frame(&mut flipper).await else {
+        panic!("expected g2's start board");
+    };
+    assert_eq!(start[..2], [0xB0, 0x01]);
+}
+
+#[tokio::test]
+async fn a_move_that_comes_after_all_brings_the_board_back() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let (mut page, mut flipper) = watch_our_snake_go_out(&addr).await;
+    post(
+        &addr,
+        "/move",
+        &game_state("g1", "me", 4).replace(r#""timeout": 500"#, r#""timeout": 200"#),
+    )
+    .await;
+    let Message::Binary(turn) = next_frame(&mut flipper).await else {
+        panic!("expected turn 4's board");
+    };
+    assert_eq!(turn[..2], [0xB0, 0x00]);
+    assert_eq!(turn[4..6], [4, 0]);
+    let turn = next_text_containing(&mut page, r#""t":"turn""#).await;
+    assert!(turn.contains(r#""turn": 4,"#), "{turn}");
+}
+
+#[tokio::test]
+async fn the_end_after_our_snake_was_presumed_out_goes_to_the_page_alone() {
+    let addr = spawn_server(PAD_IDLE).await;
+    let (mut page, mut flipper) = watch_our_snake_go_out(&addr).await;
+    post(&addr, "/end", &game_state("g1", "me", 9)).await;
+    let end = next_text_containing(&mut page, r#""t":"end""#).await;
+    assert!(end.contains(r#""turn": 9,"#), "{end}");
+    // The Flipper already played the loss: the next frame is the echo, not a second end board.
+    flipper.send(Message::binary(vec![5u8, 1])).await.unwrap();
+    assert_eq!(
+        next_frame(&mut flipper).await,
+        Message::binary(vec![5u8, 1])
+    );
+}
+
+#[tokio::test]
 async fn a_silent_pad_is_closed_and_moves_stop_waiting() {
     let addr = spawn_server(Duration::from_millis(300)).await;
     let mut pad = connect_pad(&addr).await;
@@ -597,6 +645,54 @@ async fn connect_pad(addr: &str) -> Pad {
     let hello = next_text_containing(&mut pad, r#""t":"hello""#).await;
     assert_eq!(hello, r#"{"t":"hello","mode":"assist"}"#);
     pad
+}
+
+/// A page and a Flipper that watched g1, on a 200 ms timeout, until our snake was presumed out:
+/// no `/move` came within 1.2 s of our answer to turn 3.
+async fn watch_our_snake_go_out(addr: &str) -> (Pad, Pad) {
+    let mut page = connect_pad(addr).await;
+    let mut flipper = connect_pad(addr).await;
+    flipper.send(Message::binary(vec![7u8])).await.unwrap();
+    assert_eq!(
+        next_frame(&mut flipper).await,
+        Message::binary(vec![0xB1u8])
+    );
+    post(
+        addr,
+        "/start",
+        &game_state("g1", "me", 3).replace(r#""timeout": 500"#, r#""timeout": 200"#),
+    )
+    .await;
+    post(
+        addr,
+        "/move",
+        &game_state("g1", "me", 3).replace(r#""timeout": 500"#, r#""timeout": 200"#),
+    )
+    .await;
+    let answered = Instant::now();
+    // The start, turn 3 and our move.
+    for flags in [0x01, 0x00, 0x00] {
+        let Message::Binary(board) = next_frame(&mut flipper).await else {
+            panic!("expected a board");
+        };
+        assert_eq!(board[..2], [0xB0, flags]);
+    }
+
+    let Message::Binary(lost) = next_frame(&mut flipper).await else {
+        panic!("expected the lost board");
+    };
+    let took = answered.elapsed();
+    assert!(took >= Duration::from_millis(1_100), "{took:?}");
+    // Game over and lost, on turn 4 with nothing to hold for, and ours gone from the empty board.
+    assert_eq!(lost[..2], [0xB0, 0x02 | 0x10]);
+    assert_eq!(lost[4..6], [4, 0]);
+    assert_eq!(lost[9..11], [0, 0]);
+    assert!(lost[11..lost.len() - 2].iter().all(|&b| b == 0), "{lost:?}");
+    assert_eq!(
+        next_text_containing(&mut page, r#""t":"out""#).await,
+        r#"{"t":"out","turn":3}"#
+    );
+    (page, flipper)
 }
 
 /// `snake` heading up from (5,5) on an empty 11x11 board, with a 500 ms timeout.

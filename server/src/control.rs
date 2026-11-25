@@ -3,6 +3,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
+
 use crate::game::{Direction, GameState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,12 +32,19 @@ pub struct Control {
     /// The snake the pad steers: ours in the first `/start` or `/move` that comes while no game is
     /// in progress.
     attached: Option<Attachment>,
+    /// Ours in the game that let go of the pad because ours was presumed out, until another
+    /// attaches: that game's `/end` is still the page's to show, but the Flipper has shown the loss.
+    out: Option<Attachment>,
     pub overhead: Overhead,
     /// How long we took to answer the attached snake's previous `/move`.
     pub last_spent_ms: Option<f64>,
     /// Counts the attached snake's `/move` requests. A request still waiting when a newer one
-    /// arrives has been given up on by the engine, so it stops without taking a press.
+    /// arrives has been given up on by the engine, so it stops without taking a press; a check
+    /// for ours being out after an older one finds it was asked again.
     pub latest_move: u64,
+    /// The body of that latest `/move`: the board shown if ours is presumed out after it. Only the
+    /// latest is kept, so a flood of forged moves holds no more than one.
+    pub latest_move_body: Bytes,
 }
 
 /// One snake in one game: the same game can hold two of our snakes.
@@ -121,6 +130,7 @@ impl Control {
             snake: state.you.id.to_string(),
             heard: Instant::now(),
         });
+        self.out = None;
         self.queue.clear();
         self.last_spent_ms = None;
         self.overhead = Overhead::default();
@@ -150,6 +160,24 @@ impl Control {
         self.attached = None;
         self.queue.clear();
         true
+    }
+
+    /// Releases the pad because `state`'s snake, which holds it, is presumed out; returns whether
+    /// it held it. A `/move` for it after all attaches it again like any other game.
+    pub fn presume_out(&mut self, state: &GameState) -> bool {
+        if !self.is_attached(state) {
+            return false;
+        }
+        self.out = self.attached.take();
+        self.queue.clear();
+        true
+    }
+
+    /// Whether `state`'s snake was presumed out, with no game attached since.
+    pub fn is_presumed_out(&self, state: &GameState) -> bool {
+        self.out
+            .as_ref()
+            .is_some_and(|o| o.game == state.game.id && o.snake == state.you.id)
     }
 
     pub fn is_attached(&self, state: &GameState) -> bool {
@@ -204,6 +232,14 @@ pub fn move_at_deadline(state: &GameState, mode: Mode) -> Option<Direction> {
         Mode::Assist if !state.is_certain_death(straight) => Some(straight),
         Mode::Assist | Mode::Auto => None,
     }
+}
+
+/// How long after our answer ours is presumed out if the engine has not asked for its next move:
+/// the game's timeout (capped at 10 s), which the engine may spend waiting on the other snakes,
+/// and a second more. The engine stops asking a snake that is out, but sends `/end` only once the
+/// whole game is over.
+pub fn presumed_out_after(timeout_ms: u32) -> Duration {
+    Duration::from_secs_f64((f64::from(timeout_ms).min(TIMEOUT_CAP_MS) + 1000.0) / 1000.0)
 }
 
 impl Overhead {
@@ -324,6 +360,34 @@ mod tests {
 
         control.detach(&state);
         assert!(!control.has_game_in_progress(started));
+    }
+
+    #[test]
+    fn a_snake_presumed_out_lets_go_of_the_pad_and_is_remembered_until_the_next_attach() {
+        let state = bottom_row();
+        let other_game = BOTTOM_ROW.replace(r#""id": "g""#, r#""id": "g2""#);
+        let other_game: GameState = serde_json::from_str(&other_game).unwrap();
+        let mut control = Control::default();
+        control.attach(&state);
+        assert!(!control.presume_out(&other_game));
+        control.queue.push(Direction::Right);
+
+        assert!(control.presume_out(&state));
+        assert!(!control.has_attachment());
+        assert!(control.queue.inputs.is_empty());
+        assert!(control.is_presumed_out(&state));
+        assert!(!control.is_presumed_out(&other_game));
+        assert!(!control.presume_out(&state));
+
+        control.attach(&other_game);
+        assert!(!control.is_presumed_out(&state));
+    }
+
+    #[test]
+    fn ours_is_presumed_out_a_second_past_the_timeout_capped_at_10_s() {
+        assert_eq!(presumed_out_after(500), Duration::from_millis(1_500));
+        assert_eq!(presumed_out_after(200), Duration::from_millis(1_200));
+        assert_eq!(presumed_out_after(u32::MAX), Duration::from_secs(11));
     }
 
     #[test]

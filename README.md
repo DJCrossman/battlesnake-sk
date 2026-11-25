@@ -32,9 +32,10 @@ presses are queued, so a quick double turn works. A press back into your own nec
 
 With no pad connected the autopilot plays every game and answers in well under a millisecond. The
 pad steers one snake in one game at a time: the first game to start while no other is in
-progress. That game keeps the pad until it ends or goes a minute without a request from the
-engine, and any other game running at the same time stays on autopilot. A phone that drops off
-the network is noticed within 4 seconds, after which the autopilot takes over again.
+progress. That game keeps the pad until it ends, your snake is out or it goes a minute without a
+request from the engine, and any other game running at the same time stays on autopilot. A phone
+that drops off the network is noticed within 4 seconds, after which the autopilot takes over
+again.
 
 In `assist` the snake only keeps going straight for you; it does not look for food. Switch to
 `auto` (or close the page) when you are not steering.
@@ -42,6 +43,11 @@ In `assist` the snake only keeps going straight for you; it does not look for fo
 The Flipper and the page draw the board straight from the server: it appears when the game is
 created, updates the moment the engine asks for each move, and moves your own snake as soon as
 your move is committed, so what you see is the position your next press applies to.
+
+Once your snake is out the engine stops asking for its moves, but it sends the end only when the
+whole game is over. So when no move follows yours within the game's timeout plus a second, the
+server takes your snake as out: the Flipper and the page show that you lost, and the next game
+can take the pad. If the engine was only slow and asks again after all, the board comes back.
 
 ## Controls
 
@@ -238,6 +244,11 @@ JSON ones the pad page gets, then the heartbeats and the presses. The server ans
 mode byte. It then sends a board frame when a game starts, when it is asked for each move, when our
 move is decided (our snake one step on, so the next press aims from where the head really is) and
 when the game ends. Each frame is a binary message that the board writes to the UART as it is.
+
+When no move follows ours within the game's timeout plus a second, our snake is taken as out. The
+server sends a game-over frame flagged lost, the last board at the next turn without our snake,
+and the pad page gets `{"t":"out","turn":n}`, n being the turn of our last move. That game's end
+then goes to the page alone, and a move that comes after all sends its turn as usual.
 
 A server from before that request ignores it and sends JSON. The board throws that away, so the
 Flipper shows only the connection. The board drops its socket if a message is over 15 kB (a turn

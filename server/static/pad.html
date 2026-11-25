@@ -203,6 +203,12 @@ function onFrame(frame) {
       document.getElementById("source").textContent = frame.source;
       if (lastState && lastState.turn === frame.turn) draw(advanceOurSnake(lastState, frame.move));
       break;
+    case "out":
+      // No move followed ours in time: our snake is out. A turn frame that comes after all clears it.
+      holding = false;
+      holdBar.style.width = "0";
+      document.getElementById("overlay").textContent = "You lost";
+      break;
     case "end":
       holding = false;
       holdBar.style.width = "0";

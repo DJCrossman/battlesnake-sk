@@ -13,6 +13,9 @@ pub enum Moment {
     Turn { hold_ms: u128 },
     /// The answer to that `/move`: ours one step on, as the next turn will show it.
     Moved(Direction),
+    /// No `/move` followed that answer in time, so ours is presumed out: that turn's board at the
+    /// next turn, without ours, as `/end` would show it.
+    Out,
     /// `/end` for the attached snake.
     End,
 }
@@ -37,7 +40,7 @@ const GAME_OVER: u8 = 0x02;
 const TOO_LARGE: u8 = 0x04;
 /// At `/end` ours is the only snake left on the board.
 const WON: u8 = 0x08;
-/// At `/end` ours is not on the board.
+/// At `/end` ours is not on the board, or ours was presumed out before it.
 const LOST: u8 = 0x10;
 
 /// The frame for `moment`, drawn from that request's `state`. "Ours" is the snake on the board
@@ -47,6 +50,7 @@ pub fn board_frame(state: &GameState, moment: Moment) -> Bytes {
     let mut flags = match moment {
         Moment::Start => STARTED,
         Moment::Turn { .. } | Moment::Moved(_) => 0,
+        Moment::Out => GAME_OVER | LOST,
         Moment::End => {
             let ours = state
                 .board
@@ -76,7 +80,7 @@ pub fn board_frame(state: &GameState, moment: Moment) -> Bytes {
     };
     // Each is sent as two 7-bit bytes, which carry 0..=16383.
     let turn = match moment {
-        Moment::Moved(_) => state.turn.saturating_add(1),
+        Moment::Moved(_) | Moment::Out => state.turn.saturating_add(1),
         _ => state.turn,
     }
     .min(16383);
@@ -119,6 +123,8 @@ pub fn board_frame(state: &GameState, moment: Moment) -> Bytes {
     for snake in &state.board.snakes {
         let mine = snake.id == you.id;
         let (head, body) = match moment {
+            // The Flipper drops ours from the frame before, as it does at `/end`.
+            Moment::Out if mine => continue,
             // The tail is dropped and the new head drawn as the head, so the body ends one short.
             Moment::Moved(dir) if mine => (
                 dir.step(snake.head),
@@ -262,6 +268,20 @@ mod tests {
         assert_eq!(frame[4..6], [0x01, 0x00]);
         // My body at (1,1), my head at (2,1).
         assert_eq!(frame[11..16], [0x00, 0x00, 0x34, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn out_is_a_loss_on_the_next_turn_with_ours_gone_from_the_board() {
+        let state: GameState = serde_json::from_str(SHARED).unwrap();
+        let frame = board_frame(&state, Moment::Out);
+        // Game over and lost, 3x2, turn 201, health and length as they were, nothing to hold for.
+        // Then the top row empty, empty, food and the bottom row empty, empty, the other head.
+        assert_eq!(
+            frame[1..frame.len() - 2],
+            [
+                0x12, 0x03, 0x02, 0x49, 0x01, 0x55, 0x03, 0x00, 0x00, 0x00, 0x00, 0x10, 0x06
+            ]
+        );
     }
 
     #[test]

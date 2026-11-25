@@ -154,6 +154,7 @@ async fn play_move(State(app): State<Arc<App>>, body: Bytes) -> Response {
                     .observe(latency, spent, f64::from(state.game.timeout));
             }
             control.latest_move += 1;
+            control.latest_move_body = body.clone();
             Some((
                 control.overhead.hold(state.game.timeout),
                 control.latest_move,
@@ -166,7 +167,13 @@ async fn play_move(State(app): State<Arc<App>>, body: Bytes) -> Response {
         Some((hold, this_move)) => {
             // A request for an earlier turn may still be waiting; it must stop now.
             app.wake.notify_waiters();
-            steer_attached_snake(&app, &state, &body, received, hold, this_move).await
+            let dir = steer_attached_snake(&app, &state, &body, received, hold, this_move).await;
+            tokio::spawn(presume_out_unless_asked_again(
+                app.clone(),
+                this_move,
+                control::presumed_out_after(state.game.timeout),
+            ));
+            dir
         }
         None => autopilot::choose_move(&state),
     };
@@ -181,16 +188,20 @@ async fn end_game(State(app): State<Arc<App>>, body: Bytes) -> StatusCode {
     let Ok(state) = serde_json::from_slice::<GameState>(&body) else {
         return StatusCode::BAD_REQUEST;
     };
-    let was_attached = app.control.lock().unwrap().detach(&state);
-    info!(game = %state.game.id, snake = %state.you.id, attached = was_attached, turn = state.turn, "game ended");
-    if was_attached && app.is_watched() {
+    let (was_attached, was_out) = {
+        let mut control = app.control.lock().unwrap();
+        (control.detach(&state), control.is_presumed_out(&state))
+    };
+    info!(game = %state.game.id, snake = %state.you.id, attached = was_attached, presumed_out = was_out, turn = state.turn, "game ended");
+    if (was_attached || was_out) && app.is_watched() {
         let _ = app.events.send(PadEvent {
             json: format!(
                 r#"{{"t":"end","state":{}}}"#,
                 String::from_utf8_lossy(&body)
             )
             .into(),
-            flipper: Some(board_frame(&state, Moment::End)),
+            // The Flipper played the loss when ours was presumed out; a second end would replay it.
+            flipper: was_attached.then(|| board_frame(&state, Moment::End)),
         });
     }
     StatusCode::OK
@@ -303,5 +314,32 @@ async fn wait_for_player(
                 None => (autopilot::choose_move(state), Source::Auto),
             };
         }
+    }
+}
+
+/// Once `wait` has passed since our answer to `this_move` with no newer `/move` for our snake and
+/// no `/end`, ours is presumed out: the pads are shown the loss on that `/move`'s board, and the
+/// pad is free for the next game. A `/move` that comes after all attaches the game again, and its
+/// `/end` then shows as usual.
+async fn presume_out_unless_asked_again(app: Arc<App>, this_move: u64, wait: Duration) {
+    tokio::time::sleep(wait).await;
+    let mut control = app.control.lock().unwrap();
+    if control.latest_move != this_move {
+        return;
+    }
+    let body = control.latest_move_body.clone();
+    let Ok(state) = serde_json::from_slice::<GameState>(&body) else {
+        return;
+    };
+    if !control.presume_out(&state) {
+        return;
+    }
+    info!(game = %state.game.id, snake = %state.you.id, turn = state.turn, "presumed out");
+    if app.is_watched() {
+        // Sent under the lock, so a `/move` that comes after all, or the `/end`, goes out after it.
+        let _ = app.events.send(PadEvent {
+            json: format!(r#"{{"t":"out","turn":{}}}"#, state.turn).into(),
+            flipper: Some(board_frame(&state, Moment::Out)),
+        });
     }
 }
