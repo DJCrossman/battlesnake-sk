@@ -202,7 +202,7 @@ Start a game and steer. While a game is on, the Flipper shows the board on the l
 solid with a hollow head, the others outlined, food as dots. On the right it shows the turn, your
 health and length, the mode and a bar for the time left to press. A game opens with rings around
 your head and a buzz. It ends with fireworks and a tune if you won, or your snake falling off the
-board if you lost. The final board then stays up for 15 seconds, and then the status screen
+board if you lost. The final board then stays up for 5 seconds, and then the status screen
 returns. Holding Back exits and tells the board to drop the hotspot.
 
 ### WiFi link protocol

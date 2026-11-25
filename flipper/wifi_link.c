@@ -36,7 +36,7 @@ typedef enum {
     WifiLinkEventInput,
     WifiLinkEventBoardBytes, // the board sent bytes, which wait in WifiLinkRx
     WifiLinkEventTick,
-    WifiLinkEventGameOverDone, // a game over has been on the screen for 15 s
+    WifiLinkEventGameOverDone, // a game over has been on the screen for 5 s
 } WifiLinkEventType;
 
 typedef struct {
@@ -132,7 +132,7 @@ int32_t snake_pad_app(void* p) {
     furi_message_queue_put(queue, &(WifiLinkEvent){.type = WifiLinkEventTick}, 0);
     FuriTimer* heartbeat = furi_timer_alloc(wifi_link_forward_tick, FuriTimerTypePeriodic, queue);
     furi_timer_start(heartbeat, furi_ms_to_ticks(2000));
-    // A game over stays up for 15 s from its frame's arrival, then the status screen returns
+    // A game over stays up for 5 s from its frame's arrival, then the status screen returns
     FuriTimer* game_over =
         furi_timer_alloc(wifi_link_forward_game_over_done, FuriTimerTypeOnce, queue);
 
@@ -161,10 +161,10 @@ int32_t snake_pad_app(void* p) {
         } else if(event.type == WifiLinkEventBoardBytes) {
             rx.woken = false;
         } else if(event.type == WifiLinkEventGameOverDone) {
-            // Not if a newer frame has come: more turns after all, or a game over whose 15 s
+            // Not if a newer frame has come: more turns after all, or a game over whose 5 s
             // started while this waited in the queue
             if((state.screen.shown->flags & BOARD_FLAG_GAME_OVER) &&
-               furi_get_tick() - state.screen.shown_tick >= furi_ms_to_ticks(15000)) {
+               furi_get_tick() - state.screen.shown_tick >= furi_ms_to_ticks(5000)) {
                 state.screen.has_frame = false;
             }
         } else if(event.input.key == InputKeyBack) {
@@ -212,9 +212,9 @@ int32_t snake_pad_app(void* p) {
                 if(state.screen.shown->flags & BOARD_FLAG_GAME_STARTED) {
                     state.screen.started_tick = state.screen.shown_tick;
                 }
-                // Each game over restarts the 15 s. After any other frame they run out unheeded.
+                // Each game over restarts the 5 s. After any other frame they run out unheeded.
                 if(state.screen.shown->flags & BOARD_FLAG_GAME_OVER) {
-                    furi_timer_start(game_over, furi_ms_to_ticks(15000));
+                    furi_timer_start(game_over, furi_ms_to_ticks(5000));
                 }
                 // Half the ping is about how long the frame took to get here
                 const uint32_t hold_ms = state.screen.shown->hold_10ms * 10;
